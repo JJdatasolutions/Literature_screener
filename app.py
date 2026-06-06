@@ -1,7 +1,6 @@
 import streamlit as st
 import PyPDF2
 import spacy
-from spacy.cli import download
 import nltk
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import networkx as nx
@@ -9,6 +8,9 @@ import matplotlib.pyplot as plt
 from collections import Counter
 import itertools
 import re
+import subprocess
+import sys
+import os
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Literary Dashboard", layout="wide")
@@ -16,17 +18,34 @@ st.title("📚 The Ultimate Literary Analysis Dashboard")
 st.markdown("Upload a novel (PDF) and let AI uncover its hidden structures.")
 
 # --- CACHING MODELS & DATA ---
-@st.cache_resource(show_spinner="Loading AI models (first time takes a minute)...")
+@st.cache_resource(show_spinner="Configuring AI... (first time only, please wait)")
 def load_models():
     # 1. Download NLTK data if needed 
     nltk.download('punkt', quiet=True)
     
-    # 2. Slimme Spacy lader
+    # 2. The Sandbox Bypass for SpaCy
     try:
+        # Try loading it normally first
         nlp = spacy.load("en_core_web_sm")
     except OSError:
-        # Als hij crasht omdat het model ontbreekt, downloaden we het via de code zelf!
-        download("en_core_web_sm")
+        # Define a writable temporary directory in the Linux environment
+        target_dir = "/tmp/spacy_models"
+        os.makedirs(target_dir, exist_ok=True)
+        
+        # Download and install the model into the temporary directory
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install",
+            "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
+            "--target", target_dir,
+            "--no-deps",
+            "--quiet"
+        ])
+        
+        # Inject the temporary directory into Python's module search path
+        if target_dir not in sys.path:
+            sys.path.insert(0, target_dir)
+            
+        # Load the model from the newly injected path
         nlp = spacy.load("en_core_web_sm")
         
     nlp.max_length = 2000000
@@ -36,7 +55,6 @@ def load_models():
     
     return nlp, sia
 
-# Modellen inladen
 nlp, sia = load_models()
 
 @st.cache_data
@@ -58,7 +76,7 @@ if uploaded_file is not None:
     with st.spinner("Extracting text from PDF..."):
         text_data = extract_text(uploaded_file, max_pages=max_p)
     
-    # Create Tabs for the 6 different tools
+    # Create Tabs
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "1. Style Scanner", 
         "2. Emotion Arc", 
@@ -82,7 +100,7 @@ if uploaded_file is not None:
                 
                 st.metric("Average Sentence Length", f"{avg_len:.1f} words")
                 
-                # Plot moving average of sentence length
+                # Plot
                 window = 30
                 smoothed = [sum(sent_lengths[i:i+window])/window for i in range(len(sent_lengths)-window+1)]
                 fig, ax = plt.subplots(figsize=(10, 4))
