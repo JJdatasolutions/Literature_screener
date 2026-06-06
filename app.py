@@ -42,8 +42,7 @@ def load_models():
             
         nlp = spacy.load("en_core_web_sm")
         
-    # Increased max length to safely handle full books
-    nlp.max_length = 4000000 
+    nlp.max_length = 2000000 
     sia = SentimentIntensityAnalyzer()
     return nlp, sia
 
@@ -53,12 +52,27 @@ nlp, sia = load_models()
 def extract_text(file_buffer):
     reader = PyPDF2.PdfReader(file_buffer)
     full_text = ""
-    # Process every single page in the PDF
     for page in reader.pages:
         text = page.extract_text()
         if text:
             full_text += text + " "
     return re.sub(r'\s+', ' ', full_text)
+
+# --- MEMORY SAFE CHUNKING ---
+def chunk_text(text, chunk_size=100000):
+    """Splits text into manageable chunks safely separated by spaces to avoid Out of Memory errors."""
+    words = text.split()
+    current_chunk = []
+    current_length = 0
+    for word in words:
+        current_chunk.append(word)
+        current_length += len(word) + 1
+        if current_length >= chunk_size:
+            yield " ".join(current_chunk)
+            current_chunk = []
+            current_length = 0
+    if current_chunk:
+        yield " ".join(current_chunk)
 
 # --- SIDEBAR UPLOAD ---
 st.sidebar.header("1. Upload Book")
@@ -87,25 +101,30 @@ if uploaded_file is not None:
         st.success("**Guiding Questions for Students:**\n- Where does the author use short, punchy sentences? Does this correlate with action sequences or dialogue?\n- Where are the peaks? Do these long sentences indicate heavy description, philosophical thoughts, or a 'stream of consciousness'?\n- Can you identify a rhythm or pattern in the author's writing style?")
 
         if st.button("Run Style Analysis"):
-            with st.spinner("Analyzing syntax across the entire book..."):
-                doc = nlp(text_data)
-                sentences = list(doc.sents)
-                sent_lengths = [len([t for t in s if not t.is_punct]) for s in sentences if len(s) > 2]
-                avg_len = sum(sent_lengths) / len(sent_lengths) if sent_lengths else 0
-                
-                st.metric("Average Sentence Length", f"{avg_len:.1f} words")
-                
-                window = max(30, len(sent_lengths) // 100) # Dynamic window based on book length
-                smoothed = [sum(sent_lengths[i:i+window])/window for i in range(len(sent_lengths)-window+1)]
-                
-                fig, ax = plt.subplots(figsize=(10, 4))
-                ax.plot(smoothed, color='#2b8cbe', linewidth=2)
-                ax.fill_between(range(len(smoothed)), smoothed, color='#2b8cbe', alpha=0.2)
-                ax.set_title("Sentence Length Over Time", fontsize=14, fontweight='bold')
-                ax.set_ylabel("Words per Sentence")
-                ax.set_xlabel("Story Progression (Sentences)")
-                sns.despine()
-                st.pyplot(fig)
+            with st.spinner("Analyzing syntax across the entire book (chunking to save memory)..."):
+                sent_lengths = []
+                for doc in nlp.pipe(chunk_text(text_data), disable=["ner"]):
+                    for s in doc.sents:
+                        length = len([t for t in s if not t.is_punct])
+                        if length > 2:
+                            sent_lengths.append(length)
+
+                if sent_lengths:
+                    avg_len = sum(sent_lengths) / len(sent_lengths)
+                    st.metric("Average Sentence Length", f"{avg_len:.1f} words")
+                    
+                    window = max(30, len(sent_lengths) // 100) 
+                    smoothed = [sum(sent_lengths[i:i+window])/window for i in range(len(sent_lengths)-window+1)]
+                    
+                    fig, ax = plt.subplots(figsize=(10, 4))
+                    ax.plot(smoothed, color='#2b8cbe', linewidth=2)
+                    ax.fill_between(range(len(smoothed)), smoothed, color='#2b8cbe', alpha=0.2)
+                    ax.set_title("Sentence Length Over Time", fontsize=14, fontweight='bold')
+                    ax.set_ylabel("Words per Sentence")
+                    ax.set_xlabel("Story Progression (Sentences)")
+                    sns.despine()
+                    st.pyplot(fig)
+                    plt.close(fig)
 
     # ==========================================
     # TAB 2: VONNEGUT ARC
@@ -121,22 +140,24 @@ if uploaded_file is not None:
                 sentences = re.split(r'(?<=[.!?]) +', text_data)
                 scores = [sia.polarity_scores(s)['compound'] for s in sentences if len(s) > 10]
                 
-                window = max(1, len(scores) // 20)
-                smoothed = [sum(scores[i:i+window])/window for i in range(len(scores)-window+1)]
-                x_perc = [(i / len(smoothed)) * 100 for i in range(len(smoothed))]
-                
-                fig, ax = plt.subplots(figsize=(10, 4))
-                import pandas as pd
-                ax.plot(x_perc, smoothed, color='#8856a7', linewidth=2.5)
-                ax.fill_between(x_perc, smoothed, 0, where=pd.Series(smoothed) > 0, color='green', alpha=0.2, interpolate=True)
-                ax.fill_between(x_perc, smoothed, 0, where=pd.Series(smoothed) < 0, color='red', alpha=0.2, interpolate=True)
-                
-                ax.axhline(0, color='black', linewidth=1, linestyle='--')
-                ax.set_title("Narrative Sentiment Arc", fontsize=14, fontweight='bold')
-                ax.set_xlabel("Story Progress (%)")
-                ax.set_ylabel("Sentiment Score")
-                sns.despine()
-                st.pyplot(fig)
+                if scores:
+                    window = max(1, len(scores) // 20)
+                    smoothed = [sum(scores[i:i+window])/window for i in range(len(scores)-window+1)]
+                    x_perc = [(i / len(smoothed)) * 100 for i in range(len(smoothed))]
+                    
+                    fig, ax = plt.subplots(figsize=(10, 4))
+                    import pandas as pd
+                    ax.plot(x_perc, smoothed, color='#8856a7', linewidth=2.5)
+                    ax.fill_between(x_perc, smoothed, 0, where=pd.Series(smoothed) > 0, color='green', alpha=0.2, interpolate=True)
+                    ax.fill_between(x_perc, smoothed, 0, where=pd.Series(smoothed) < 0, color='red', alpha=0.2, interpolate=True)
+                    
+                    ax.axhline(0, color='black', linewidth=1, linestyle='--')
+                    ax.set_title("Narrative Sentiment Arc", fontsize=14, fontweight='bold')
+                    ax.set_xlabel("Story Progress (%)")
+                    ax.set_ylabel("Sentiment Score")
+                    sns.despine()
+                    st.pyplot(fig)
+                    plt.close(fig)
 
     # ==========================================
     # TAB 3: SOCIAL NETWORK
@@ -149,62 +170,64 @@ if uploaded_file is not None:
 
         if st.button("Run Network Analysis"):
             with st.spinner("Extracting characters across the full book..."):
-                doc = nlp(text_data)
                 char_counts = Counter()
                 interactions = {}
 
-                for sent in doc.sents:
-                    # Robust cleanup: Removes standard and typographical apostrophes
-                    raw_chars = [ent.text for ent in sent.ents if ent.label_ == "PERSON" and len(ent.text) > 3]
-                    cleaned_chars = set([re.sub(r"['’]s$", "", char).strip() for char in raw_chars])
-                    
-                    for char in cleaned_chars:
-                        char_counts[char] += 1
-                    
-                    if len(cleaned_chars) > 1:
-                        sent_score = sia.polarity_scores(sent.text)['compound']
-                        for c1, c2 in itertools.combinations(cleaned_chars, 2):
-                            pair = tuple(sorted([c1, c2]))
-                            if pair not in interactions:
-                                interactions[pair] = {'weight': 0, 'sentiment': []}
-                            interactions[pair]['weight'] += 1
-                            interactions[pair]['sentiment'].append(sent_score)
+                for doc in nlp.pipe(chunk_text(text_data)):
+                    for sent in doc.sents:
+                        raw_chars = [ent.text for ent in sent.ents if ent.label_ == "PERSON" and len(ent.text) > 3]
+                        cleaned_chars = set([re.sub(r"['’]s$", "", char).strip() for char in raw_chars])
+                        
+                        for char in cleaned_chars:
+                            char_counts[char] += 1
+                        
+                        if len(cleaned_chars) > 1:
+                            sent_score = sia.polarity_scores(sent.text)['compound']
+                            for c1, c2 in itertools.combinations(cleaned_chars, 2):
+                                pair = tuple(sorted([c1, c2]))
+                                if pair not in interactions:
+                                    interactions[pair] = {'weight': 0, 'sentiment': []}
+                                interactions[pair]['weight'] += 1
+                                interactions[pair]['sentiment'].append(sent_score)
 
-                top_chars = [c for c, count in char_counts.most_common(15)]
-                G = nx.Graph()
-                
-                for char in top_chars:
-                    G.add_node(char, size=char_counts[char]*60)
+                if char_counts:
+                    top_chars = [c for c, count in char_counts.most_common(15)]
+                    G = nx.Graph()
                     
-                for (c1, c2), data in interactions.items():
-                    if c1 in top_chars and c2 in top_chars:
-                        avg_sent = sum(data['sentiment']) / len(data['sentiment'])
-                        if avg_sent > 0.1: color = '#2ca02c' # Green
-                        elif avg_sent < -0.1: color = '#d62728' # Red
-                        else: color = '#b0b0b0' # Grey
-                        G.add_edge(c1, c2, weight=data['weight'], color=color)
+                    for char in top_chars:
+                        G.add_node(char, size=char_counts[char]*60)
+                        
+                    for (c1, c2), data in interactions.items():
+                        if c1 in top_chars and c2 in top_chars:
+                            avg_sent = sum(data['sentiment']) / len(data['sentiment'])
+                            if avg_sent > 0.1: color = '#2ca02c'
+                            elif avg_sent < -0.1: color = '#d62728'
+                            else: color = '#b0b0b0'
+                            G.add_edge(c1, c2, weight=data['weight'], color=color)
 
-                fig, ax = plt.subplots(figsize=(12, 9))
-                pos = nx.kamada_kawai_layout(G)
-                
-                sizes = [nx.get_node_attributes(G, 'size')[n] for n in G.nodes()]
-                edge_colors = [nx.get_edge_attributes(G, 'color')[e] for e in G.edges()]
-                weights = [nx.get_edge_attributes(G, 'weight')[e] for e in G.edges()]
-                max_w = max(weights) if weights else 1
-                scaled_weights = [(w/max_w)*5 + 1 for w in weights]
-                
-                nx.draw_networkx_edges(G, pos, width=scaled_weights, edge_color=edge_colors, 
-                                       alpha=0.6, connectionstyle="arc3,rad=0.1", ax=ax)
-                
-                nx.draw_networkx_nodes(G, pos, node_size=sizes, node_color='#a6bddb', 
-                                       edgecolors='black', linewidths=1.5, ax=ax)
-                
-                nx.draw_networkx_labels(G, pos, font_size=11, font_family='sans-serif', font_weight='bold',
-                                        bbox=dict(facecolor='white', edgecolor='none', alpha=0.7, pad=1), ax=ax)
-                
-                ax.set_title("Character Interaction Network", fontsize=16, fontweight='bold')
-                plt.axis('off')
-                st.pyplot(fig)
+                    if len(G.nodes) > 0:
+                        fig, ax = plt.subplots(figsize=(12, 9))
+                        pos = nx.kamada_kawai_layout(G)
+                        
+                        sizes = [nx.get_node_attributes(G, 'size')[n] for n in G.nodes()]
+                        edge_colors = [nx.get_edge_attributes(G, 'color')[e] for e in G.edges()]
+                        weights = [nx.get_edge_attributes(G, 'weight')[e] for e in G.edges()]
+                        max_w = max(weights) if weights else 1
+                        scaled_weights = [(w/max_w)*5 + 1 for w in weights]
+                        
+                        nx.draw_networkx_edges(G, pos, width=scaled_weights, edge_color=edge_colors, 
+                                            alpha=0.6, connectionstyle="arc3,rad=0.1", ax=ax)
+                        
+                        nx.draw_networkx_nodes(G, pos, node_size=sizes, node_color='#a6bddb', 
+                                            edgecolors='black', linewidths=1.5, ax=ax)
+                        
+                        nx.draw_networkx_labels(G, pos, font_size=11, font_family='sans-serif', font_weight='bold',
+                                                bbox=dict(facecolor='white', edgecolor='none', alpha=0.7, pad=1), ax=ax)
+                        
+                        ax.set_title("Character Interaction Network", fontsize=16, fontweight='bold')
+                        plt.axis('off')
+                        st.pyplot(fig)
+                        plt.close(fig)
 
     # ==========================================
     # TAB 4: GENDER BIAS
@@ -212,42 +235,54 @@ if uploaded_file is not None:
     with tab4:
         st.header("Gender-Bias Agency Scanner")
         
-        st.info("**Legend:** Displays the top 10 verbs directly associated with male pronouns (he/him) versus female pronouns (she/her).")
+        st.info("**Legend:** Displays the top 10 verbs directly associated with male entities vs female entities. Neutral verbs (e.g., 'turn', 'go') have been aggressively filtered out to focus on true agency and character action.")
         st.success("**Guiding Questions for Students:**\n- Are male characters assigned more active, aggressive, or physical verbs? \n- Are female characters associated with passive, emotional, or reactive verbs?\n- How does the grammar of the book reflect the societal norms or gender biases of the time it was written?")
 
         if st.button("Run Gender Analysis"):
-            with st.spinner("Analyzing pronouns and verbs..."):
-                doc = nlp(text_data)
+            with st.spinner("Analyzing pronouns, nouns, and verbs..."):
                 m_verbs, f_verbs = Counter(), Counter()
-                m_terms = {'he', 'him', 'his'}
-                f_terms = {'she', 'her', 'hers'}
-                stop_v = {'be', 'have', 'do', 'go', 'get', 'know', 'think', 'say', 'see', 'look', 'come', 'tell', 'ask', 'seem'}
+                
+                # Uitgebreide vocabulaire
+                m_terms = {'he', 'him', 'his', 'man', 'men', 'boy', 'boys', 'father', 'brother', 'husband', 'uncle', 'gentleman'}
+                f_terms = {'she', 'her', 'hers', 'woman', 'women', 'girl', 'girls', 'mother', 'sister', 'wife', 'aunt', 'lady'}
+                
+                # Zwaar uitgebreide lijst van oninteressante/neutrale werkwoorden
+                stop_v = {
+                    'be', 'have', 'do', 'go', 'get', 'know', 'think', 'say', 'see', 'look', 
+                    'come', 'tell', 'ask', 'seem', 'turn', 'move', 'start', 'begin', 'stop', 
+                    'use', 'try', 'feel', 'leave', 'make', 'take', 'give', 'find', 'call', 
+                    'want', 'let', 'put', 'keep', 'show', 'hold', 'bring', 'become', 'mean'
+                }
 
-                for token in doc:
-                    if token.dep_ == "nsubj" and token.head.pos_ == "VERB":
-                        subj = token.text.lower()
-                        verb = token.head.lemma_.lower()
-                        if verb not in stop_v and len(verb) > 2:
-                            if subj in m_terms: m_verbs[verb] += 1
-                            elif subj in f_terms: f_verbs[verb] += 1
+                for doc in nlp.pipe(chunk_text(text_data), disable=["ner"]):
+                    for token in doc:
+                        if token.dep_ == "nsubj" and token.head.pos_ == "VERB":
+                            subj = token.text.lower()
+                            verb = token.head.lemma_.lower()
+                            if verb not in stop_v and len(verb) > 2:
+                                if subj in m_terms: 
+                                    m_verbs[verb] += 1
+                                elif subj in f_terms: 
+                                    f_verbs[verb] += 1
 
                 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
                 
                 if m_verbs:
                     v, c = zip(*m_verbs.most_common(10))
                     sns.barplot(x=list(c), y=list(v), ax=ax1, color='#3182bd')
-                    ax1.set_title("Top Male Actions (He/Him)", fontsize=12, fontweight='bold')
+                    ax1.set_title("Top Male Actions", fontsize=12, fontweight='bold')
                     ax1.set_xlabel("Frequency")
                 
                 if f_verbs:
                     v, c = zip(*f_verbs.most_common(10))
                     sns.barplot(x=list(c), y=list(v), ax=ax2, color='#e6550d')
-                    ax2.set_title("Top Female Actions (She/Her)", fontsize=12, fontweight='bold')
+                    ax2.set_title("Top Female Actions", fontsize=12, fontweight='bold')
                     ax2.set_xlabel("Frequency")
                 
                 sns.despine()
                 plt.tight_layout()
                 st.pyplot(fig)
+                plt.close(fig)
 
     # ==========================================
     # TAB 5: COLOR PALETTE
@@ -281,7 +316,7 @@ if uploaded_file is not None:
                         ax.barh(0, width, left=left, color=colors[c_name], edgecolor='black', linewidth=1.5)
                         if width > 0.05:
                             ax.text(left + width/2, 0, f"{c_name}\n{int(width*100)}%", 
-                                    ha='center', va='center', color='white' if c_name not in ['white', 'yellow', 'gold'] else 'black',
+                                    ha='center', va='center', color='white' if c_name not in ['white', 'yellow', 'gold', 'f0f0f0'] else 'black',
                                     fontweight='bold', fontsize=10)
                         left += width
                         
@@ -290,6 +325,7 @@ if uploaded_file is not None:
                     ax.set_title("Novel Aesthetic Proportion", fontsize=14, fontweight='bold')
                     sns.despine(left=True, bottom=True)
                     st.pyplot(fig)
+                    plt.close(fig)
                 else:
                     st.write("No strong color palette detected in this excerpt.")
 
