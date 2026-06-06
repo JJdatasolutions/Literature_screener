@@ -35,15 +35,15 @@ def load_models():
         target_dir = "/tmp/spacy_models"
         os.makedirs(target_dir, exist_ok=True)
         subprocess.check_call([
-            sys.executable, "-m", "pip", "install",
-            "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
+            sys.executable, "-m", "pip", "install", 
+            "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl", 
             "--target", target_dir, "--no-deps", "--quiet"
         ])
-        if target_dir not in sys.path:
+        if target_dir not in sys.path: 
             sys.path.insert(0, target_dir)
         nlp = spacy.load("en_core_web_sm")
     
-    if "sentencizer" not in nlp.pipe_names:
+    if "sentencizer" not in nlp.pipe_names: 
         nlp.add_pipe("sentencizer")
         
     nlp.max_length = 2000000 
@@ -76,38 +76,95 @@ def get_chunks(text, chunk_size=50000):
     if current_chunk:
         yield " ".join(current_chunk)
 
-# --- STRICT ENTITY CLEANER ---
+# --- BULLETPROOF ENTITY RESOLUTION PIPELINE ---
 def clean_entity_name(text):
-    """Zeer agressieve wasstraat voor personagenamen."""
-    # 1. Hak af vanaf de bezits-s ("Gatsby's foot" -> "Gatsby")
-    text = re.split(r"['’]s\b", text)[0]
+    """Advanced Cleansing: Strips possessives, titles, and noise words."""
+    # 1. Strip possessives
+    text = re.split(r"['’]s\b", text, flags=re.IGNORECASE)[0]
     
-    # 2. Titels verwijderen
+    # 2. Strip common titles
     titles = [r'\bMr\.?\s', r'\bMrs\.?\s', r'\bMs\.?\s', r'\bMiss\s', 
               r'\bDr\.?\s', r'\bAunt\s', r'\bUncle\s', r'\bProfessor\s', 
               r'\bCaptain\s', r'\bLord\s', r'\bLady\s', r'\bSir\s']
     for t in titles:
         text = re.sub(t, "", text, flags=re.IGNORECASE)
         
-    # 3. Zwarte lijst van woorden die AI aanziet voor namen (vaak begin van een zin)
+    # 3. Aggressive case-insensitive blacklist for sentence-starting noise words
     ignore_words = {
-        "suppose", "well", "yes", "no", "oh", "ah", "hey", "say", "let", 
-        "come", "look", "see", "think", "know", "don", "maybe", "perhaps", 
-        "suddenly", "then", "now", "and", "but", "or", "so", "why", "what", 
-        "when", "where", "how", "good", "god", "dear", "please", "just"
+        "suppose", "suddenly", "well", "yes", "no", "oh", "ah", "hey", "say", "let", 
+        "come", "look", "see", "think", "know", "don", "maybe", "perhaps", "then", 
+        "now", "and", "but", "or", "so", "why", "what", "when", "where", "how", 
+        "good", "god", "dear", "please", "just", "looking", "man", "woman", "boy", "girl"
     }
     
     words = []
     for w in text.split():
-        # Moet met een hoofdletter beginnen, EN mag niet in de ignore list zitten
-        if w.istitle() and w.lower() not in ignore_words:
-            words.append(w)
+        # Keep only alphabetic characters
+        clean_w = re.sub(r'[^A-Za-z]', '', w)
+        # Must be Title cased and not in the blacklist
+        if clean_w.istitle() and clean_w.lower() not in ignore_words:
+            words.append(clean_w)
             
-    clean_name = " ".join(words)
-    # 4. Verwijder alle overgebleven vreemde leestekens (behoud alleen letters en spaties)
-    clean_name = re.sub(r'[^A-Za-z\s]', '', clean_name).strip()
+    return " ".join(words).strip()
+
+def resolve_entities(raw_char_counts, raw_interactions):
+    """Token-Based Clustering: Maps partial names to canonical full names."""
+    unique_names = list(raw_char_counts.keys())
     
-    return clean_name
+    # Sort names by frequency descending to prioritize popular characters as canonical anchors
+    unique_names.sort(key=lambda x: raw_char_counts[x], reverse=True)
+    
+    # Identify potential full names (2 or more tokens)
+    full_names = [n for n in unique_names if len(n.split()) > 1]
+    
+    name_mapping = {}
+    for name in unique_names:
+        name_tokens = set(name.split())
+        best_match = name
+        best_match_count = -1
+        
+        for fn in full_names:
+            if name == fn:
+                continue
+            fn_tokens = set(fn.split())
+            
+            # If the current name is a subset of a full name (e.g., "Nick" is subset of "Nick Carraway")
+            if name_tokens.issubset(fn_tokens):
+                # Map to the most frequent full name
+                if raw_char_counts[fn] > best_match_count:
+                    best_match = fn
+                    best_match_count = raw_char_counts[fn]
+        
+        name_mapping[name] = best_match
+
+    # Collapse transitive mappings just in case (A->B, B->C becomes A->C)
+    for name in name_mapping:
+        current = name
+        visited = set()
+        while name_mapping[current] != current and current not in visited:
+            visited.add(current)
+            current = name_mapping[current]
+        name_mapping[name] = current
+
+    # Rebuild consolidated counts
+    char_counts = Counter()
+    for name, count in raw_char_counts.items():
+        canonical_name = name_mapping.get(name, name)
+        char_counts[canonical_name] += count
+
+    # Rebuild consolidated interactions
+    interactions = {}
+    for (c1, c2), data in raw_interactions.items():
+        m1 = name_mapping.get(c1, c1)
+        m2 = name_mapping.get(c2, c2)
+        if m1 != m2: 
+            pair = tuple(sorted([m1, m2]))
+            if pair not in interactions:
+                interactions[pair] = {'weight': 0, 'sentiment': []}
+            interactions[pair]['weight'] += data['weight']
+            interactions[pair]['sentiment'].extend(data['sentiment'])
+            
+    return char_counts, interactions
 
 # --- SIDEBAR UPLOAD & SETTINGS ---
 st.sidebar.header("1. Upload Book")
@@ -120,6 +177,7 @@ if uploaded_file is not None:
 
     st.sidebar.markdown("---")
     st.sidebar.header("2. Analysis Limits")
+    st.sidebar.info("To prevent memory crashes on large books, limit the scope of the analysis.")
     
     max_limit = min(total_pages, 200)
     selected_page_count = st.sidebar.slider("Number of pages to analyze", min_value=10, max_value=max_limit, value=max_limit)
@@ -127,20 +185,23 @@ if uploaded_file is not None:
 
     if read_direction == "Beginning of book":
         target_pages = all_pages[:selected_page_count]
+        st.sidebar.success(f"Analyzing pages 1 to {selected_page_count}.")
     else:
         target_pages = all_pages[-selected_page_count:]
+        st.sidebar.success(f"Analyzing the final {selected_page_count} pages.")
 
     text_data = re.sub(r'\s+', ' ', " ".join(target_pages))
     chunks = list(get_chunks(text_data))
     total_chunks = len(chunks)
     
-    # Reset Social Data als de gebruiker de slider aanpast
+    # Reset tracking state if text changes
     current_hash = hash(text_data)
     if st.session_state.get('text_hash') != current_hash:
         if 'social_data' in st.session_state:
             del st.session_state['social_data']
         st.session_state['text_hash'] = current_hash
 
+    # Create Tabs
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "1. Style Scanner", 
         "2. Emotion Arc", 
@@ -154,18 +215,24 @@ if uploaded_file is not None:
     # ==========================================
     with tab1:
         st.header("Comparative Style Scanner")
-        st.info(f"**Legend:** Analyzing average sentence length over the selected {selected_page_count} pages.")
+        st.info(f"**Legend:** Analyzing average sentence length over the selected {selected_page_count} pages. High peaks indicate long, complex sentences.")
+        
         if st.button("Run Style Analysis"):
             progress_bar = st.progress(0)
+            status_text = st.empty()
             sent_lengths = []
             
             for i, doc in enumerate(nlp.pipe(chunks, disable=["ner", "lemmatizer", "textcat", "custom"])):
                 for s in doc.sents:
                     length = len([t for t in s if not t.is_punct])
-                    if length > 2: sent_lengths.append(length)
+                    if length > 2: 
+                        sent_lengths.append(length)
+                
                 progress_bar.progress((i + 1) / total_chunks)
+                status_text.text(f"Processing chunk {i + 1} of {total_chunks}...")
                 gc.collect()
 
+            status_text.text("Generating visual...")
             if sent_lengths:
                 avg_len = sum(sent_lengths) / len(sent_lengths)
                 st.metric("Average Sentence Length", f"{avg_len:.1f} words")
@@ -182,17 +249,24 @@ if uploaded_file is not None:
                 sns.despine()
                 st.pyplot(fig)
                 plt.close(fig)
+                
             progress_bar.empty()
+            status_text.empty()
 
     # ==========================================
     # TAB 2: VONNEGUT ARC
     # ==========================================
     with tab2:
         st.header("The Vonnegut Emotion Arc")
+        st.info("**Legend:** The Y-axis represents the emotional tone (-1 is extreme negativity/tragedy, +1 is extreme positivity/joy).")
+
         if st.button("Run Emotion Arc"):
             with st.spinner("Calculating sentiment..."):
                 sentences = re.split(r'(?<=[.!?]) +', text_data)
-                scores = [sia.polarity_scores(s)['compound'] for s in sentences if len(s) > 10]
+                scores = []
+                for s in sentences:
+                    if len(s) > 10:
+                        scores.append(sia.polarity_scores(s)['compound'])
                 gc.collect()
 
                 if scores:
@@ -204,9 +278,10 @@ if uploaded_file is not None:
                     ax.plot(x_perc, smoothed, color='#8856a7', linewidth=2.5)
                     ax.fill_between(x_perc, smoothed, 0, where=pd.Series(smoothed) > 0, color='green', alpha=0.2, interpolate=True)
                     ax.fill_between(x_perc, smoothed, 0, where=pd.Series(smoothed) < 0, color='red', alpha=0.2, interpolate=True)
+                    
                     ax.axhline(0, color='black', linewidth=1, linestyle='--')
                     ax.set_title(f"Narrative Sentiment Arc ({selected_page_count} pages)", fontsize=14, fontweight='bold')
-                    ax.set_xlabel("Selected Text Progress (%)")
+                    ax.set_xlabel("Story Progress (%)")
                     ax.set_ylabel("Sentiment Score")
                     sns.despine()
                     st.pyplot(fig)
@@ -217,17 +292,19 @@ if uploaded_file is not None:
     # ==========================================
     with tab3:
         st.header("Social Web & Relationship Dynamics")
-        
+        st.info("**Legend:**\n- **Node Size:** Frequency of mentions.\n- **Edge Thickness:** Interaction frequency.\n- **Edge Color:** Green = Positive, Red = Negative, Grey = Neutral.")
+
         if st.button("Run Social Analysis"):
             progress_bar = st.progress(0)
+            status_text = st.empty()
             raw_char_counts = Counter()
             raw_interactions = {}
 
+            # STEP 1: Extraction & Cleansing
             for i, doc in enumerate(nlp.pipe(chunks, disable=["tagger", "parser", "lemmatizer", "textcat", "custom"])):
                 for sent in doc.sents:
                     raw_chars = [ent.text for ent in sent.ents if ent.label_ == "PERSON" and len(ent.text) > 2]
                     
-                    # Toepassen van de agressieve schoning
                     cleaned_chars = set()
                     for char in raw_chars:
                         clean_name = clean_entity_name(char)
@@ -247,48 +324,27 @@ if uploaded_file is not None:
                             raw_interactions[pair]['sentiment'].append(sent_score)
                 
                 progress_bar.progress((i + 1) / total_chunks)
+                status_text.text(f"Extracting entities: chunk {i + 1} of {total_chunks}...")
                 gc.collect()
 
-            # Deduplicatie (Slimme Fusie)
-            sorted_names = sorted(raw_char_counts.keys(), key=len, reverse=True)
-            name_mapping = {}
-            for name in sorted_names:
-                mapped = False
-                for longer_name in list(set(name_mapping.values())):
-                    # Controleer of de kortere naam (bijv. "Nick") onderdeel is van de langere ("Nick Carraway")
-                    if re.search(r'\b' + re.escape(name) + r'\b', longer_name):
-                        name_mapping[name] = longer_name
-                        mapped = True
-                        break
-                if not mapped:
-                    name_mapping[name] = name
-
-            char_counts = Counter()
-            for name, count in raw_char_counts.items():
-                char_counts[name_mapping.get(name, name)] += count
-
-            interactions = {}
-            for (c1, c2), data in raw_interactions.items():
-                m1 = name_mapping.get(c1, c1)
-                m2 = name_mapping.get(c2, c2)
-                if m1 != m2: 
-                    pair = tuple(sorted([m1, m2]))
-                    if pair not in interactions:
-                        interactions[pair] = {'weight': 0, 'sentiment': []}
-                    interactions[pair]['weight'] += data['weight']
-                    interactions[pair]['sentiment'].extend(data['sentiment'])
+            status_text.text("Applying Entity Resolution Clustering...")
+            
+            # STEP 2: Token-Based Clustering
+            char_counts, interactions = resolve_entities(raw_char_counts, raw_interactions)
 
             if char_counts:
                 top_chars = [c for c, count in char_counts.most_common(15)]
-                # Sla op in sessie voor de dropdowns en visualisaties
+                # Save to session state to render graph and populate dropdowns
                 st.session_state['social_data'] = {
                     'top_chars': top_chars,
                     'char_counts': char_counts,
                     'interactions': interactions
                 }
+            
             progress_bar.empty()
+            status_text.empty()
 
-        # Render het netwerk als er data is
+        # STEP 3: Display Graph and Relationship Tracker
         if 'social_data' in st.session_state:
             top_chars = st.session_state['social_data']['top_chars']
             char_counts = st.session_state['social_data']['char_counts']
@@ -297,6 +353,7 @@ if uploaded_file is not None:
             G = nx.Graph()
             for char in top_chars:
                 G.add_node(char, weight=char_counts[char])
+                
             for (c1, c2), data in interactions.items():
                 if c1 in top_chars and c2 in top_chars:
                     avg_sent = sum(data['sentiment']) / len(data['sentiment']) if data['sentiment'] else 0
@@ -308,6 +365,7 @@ if uploaded_file is not None:
             if len(G.nodes) > 0:
                 fig, ax = plt.subplots(figsize=(14, 10), facecolor='#fafafa')
                 ax.set_facecolor('#fafafa')
+                
                 pos = nx.spring_layout(G, k=0.8, iterations=60, seed=42)
                 
                 node_weights = [nx.get_node_attributes(G, 'weight')[n] for n in G.nodes()]
@@ -319,10 +377,16 @@ if uploaded_file is not None:
                 max_edge_w = max(weights) if weights else 1
                 scaled_edge_widths = [(w / max_edge_w) * 6 + 1.5 for w in weights]
                 
-                nx.draw_networkx_edges(G, pos, width=scaled_edge_widths, edge_color=edge_colors, alpha=0.4, connectionstyle="arc3,rad=0.2", ax=ax)
-                nx.draw_networkx_nodes(G, pos, node_size=node_sizes, node_color=node_weights, cmap=plt.cm.Blues, edgecolors='#1e3d59', linewidths=1.8, ax=ax)
-                nx.draw_networkx_labels(G, pos, font_size=11, font_family='sans-serif', font_weight='bold', font_color='#1e3d59',
-                                        bbox=dict(facecolor='#ffffff', edgecolor='#1e3d59', alpha=0.9, boxstyle='round,pad=0.3', linewidth=1), ax=ax)
+                nx.draw_networkx_edges(G, pos, width=scaled_edge_widths, edge_color=edge_colors, 
+                                       alpha=0.4, connectionstyle="arc3,rad=0.2", ax=ax)
+                
+                nx.draw_networkx_nodes(G, pos, node_size=node_sizes, node_color=node_weights, 
+                                       cmap=plt.cm.Blues, edgecolors='#1e3d59', linewidths=1.8, ax=ax)
+                
+                nx.draw_networkx_labels(G, pos, font_size=11, font_family='sans-serif', font_weight='bold',
+                                        font_color='#1e3d59',
+                                        bbox=dict(facecolor='#ffffff', edgecolor='#1e3d59', alpha=0.9, 
+                                                  boxstyle='round,pad=0.3', linewidth=1), ax=ax)
                 
                 ax.set_title("✨ Dynamic Character Interaction Network", fontsize=18, fontweight='bold', color='#1e3d59', pad=20)
                 plt.axis('off')
@@ -331,8 +395,9 @@ if uploaded_file is not None:
 
             st.markdown("---")
             st.subheader("📈 Relationship Evolution Tracker")
-            st.info("Select two characters from the network above to track their emotional dynamic over time.")
+            st.info("Select two resolved characters from the network above to track their emotional dynamic over time.")
             
+            # Automatically populate selectboxes using resolved canonical names
             col1, col2 = st.columns(2)
             char1 = col1.selectbox("First Character", top_chars, index=0)
             char2 = col2.selectbox("Second Character", top_chars, index=1 if len(top_chars) > 1 else 0)
@@ -343,6 +408,7 @@ if uploaded_file is not None:
                     progression, sentiments = [], []
 
                     for i, s in enumerate(sentences):
+                        # Use the first token of the canonical name for robust matching in sentences
                         c1_base = char1.split()[0]
                         c2_base = char2.split()[0]
                         
@@ -353,16 +419,19 @@ if uploaded_file is not None:
                     gc.collect()
 
                     if len(sentiments) < 3:
-                        st.warning(f"Not enough interactions between **{char1}** and **{char2}** in this selection to draw a trendline.")
+                        st.warning(f"Not enough direct interactions found between **{char1}** and **{char2}** to draw a trendline.")
                     else:
                         df = pd.DataFrame({'Progress': progression, 'Sentiment': sentiments})
+                        
                         fig, ax = plt.subplots(figsize=(10, 5))
-                        sns.scatterplot(data=df, x='Progress', y='Sentiment', color='#1f77b4', s=60, alpha=0.6, ax=ax)
-                        sns.regplot(data=df, x='Progress', y='Sentiment', scatter=False, order=3, color='#e41a1c')
+                        sns.scatterplot(data=df, x='Progress', y='Sentiment', color='#1f77b4', s=60, alpha=0.6, ax=ax, label="Interaction")
+                        sns.regplot(data=df, x='Progress', y='Sentiment', scatter=False, order=3, color='#e41a1c', label="Trend")
+                        
                         ax.axhline(0, color='black', linewidth=1, linestyle='--')
                         ax.set_title(f"Relationship Evolution: {char1} & {char2}", fontsize=14, fontweight='bold')
                         ax.set_xlabel("Selected Text Progress (%)")
                         ax.set_ylabel("Interaction Sentiment (-1 to +1)")
+                        ax.legend()
                         sns.despine()
                         st.pyplot(fig)
                         plt.close(fig)
@@ -372,7 +441,7 @@ if uploaded_file is not None:
     # ==========================================
     with tab4:
         st.header("Gender-Bias Agency Scanner")
-        st.info("**Legend:** Top 10 verbs directly associated with male vs female entities. Neutral verbs ('turn', 'go') are filtered out.")
+        st.info("**Legend:** Displays the top 10 verbs directly associated with male vs female entities. Neutral verbs ('turn', 'go') are aggressively filtered.")
 
         if st.button("Run Gender Analysis"):
             progress_bar = st.progress(0)
@@ -431,7 +500,7 @@ if uploaded_file is not None:
     # ==========================================
     with tab5:
         st.header("The Aesthetic Color Palette")
-        st.info("**Legend:** Proportion of how often specific colors are explicitly mentioned.")
+        st.info("**Legend:** A proportional visual breakdown of how often specific colors are explicitly mentioned.")
 
         if st.button("Extract Colors"):
             with st.spinner("Scanning for aesthetic keywords..."):
@@ -458,7 +527,8 @@ if uploaded_file is not None:
                         ax.barh(0, width, left=left, color=colors[c_name], edgecolor='black', linewidth=1.5)
                         if width > 0.05:
                             ax.text(left + width/2, 0, f"{c_name}\n{int(width*100)}%", 
-                                    ha='center', va='center', color='white' if c_name not in ['white', 'yellow', 'gold', 'f0f0f0'] else 'black',
+                                    ha='center', va='center', 
+                                    color='white' if c_name not in ['white', 'yellow', 'gold', 'f0f0f0'] else 'black',
                                     fontweight='bold', fontsize=10)
                         left += width
                         
