@@ -42,17 +42,19 @@ def load_models():
             
         nlp = spacy.load("en_core_web_sm")
         
-    nlp.max_length = 2000000
+    # Increased max length to safely handle full books
+    nlp.max_length = 4000000 
     sia = SentimentIntensityAnalyzer()
     return nlp, sia
 
 nlp, sia = load_models()
 
 @st.cache_data
-def extract_text(file_buffer, max_pages=50):
+def extract_text(file_buffer):
     reader = PyPDF2.PdfReader(file_buffer)
     full_text = ""
-    for page in reader.pages[:max_pages]:
+    # Process every single page in the PDF
+    for page in reader.pages:
         text = page.extract_text()
         if text:
             full_text += text + " "
@@ -61,13 +63,12 @@ def extract_text(file_buffer, max_pages=50):
 # --- SIDEBAR UPLOAD ---
 st.sidebar.header("1. Upload Book")
 uploaded_file = st.sidebar.file_uploader("Choose a PDF file", type="pdf")
-max_p = st.sidebar.slider("Pages to analyze", 10, 150, 50, help="More pages take longer to process.")
 
 if uploaded_file is not None:
-    with st.spinner("Extracting text from PDF..."):
-        text_data = extract_text(uploaded_file, max_pages=max_p)
+    with st.spinner("Extracting full text from PDF (this may take a minute)..."):
+        text_data = extract_text(uploaded_file)
     
-    # Create Tabs (Now exactly 5)
+    # Create Tabs
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "1. Style Scanner", 
         "2. Emotion Arc", 
@@ -86,15 +87,15 @@ if uploaded_file is not None:
         st.success("**Guiding Questions for Students:**\n- Where does the author use short, punchy sentences? Does this correlate with action sequences or dialogue?\n- Where are the peaks? Do these long sentences indicate heavy description, philosophical thoughts, or a 'stream of consciousness'?\n- Can you identify a rhythm or pattern in the author's writing style?")
 
         if st.button("Run Style Analysis"):
-            with st.spinner("Analyzing syntax..."):
-                doc = nlp(text_data[:500000])
+            with st.spinner("Analyzing syntax across the entire book..."):
+                doc = nlp(text_data)
                 sentences = list(doc.sents)
                 sent_lengths = [len([t for t in s if not t.is_punct]) for s in sentences if len(s) > 2]
                 avg_len = sum(sent_lengths) / len(sent_lengths) if sent_lengths else 0
                 
                 st.metric("Average Sentence Length", f"{avg_len:.1f} words")
                 
-                window = 30
+                window = max(30, len(sent_lengths) // 100) # Dynamic window based on book length
                 smoothed = [sum(sent_lengths[i:i+window])/window for i in range(len(sent_lengths)-window+1)]
                 
                 fig, ax = plt.subplots(figsize=(10, 4))
@@ -125,9 +126,10 @@ if uploaded_file is not None:
                 x_perc = [(i / len(smoothed)) * 100 for i in range(len(smoothed))]
                 
                 fig, ax = plt.subplots(figsize=(10, 4))
+                import pandas as pd
                 ax.plot(x_perc, smoothed, color='#8856a7', linewidth=2.5)
-                ax.fill_between(x_perc, smoothed, 0, where=(pd.Series(smoothed) > 0) if 'pd' in locals() else [s > 0 for s in smoothed], color='green', alpha=0.2, interpolate=True)
-                ax.fill_between(x_perc, smoothed, 0, where=(pd.Series(smoothed) < 0) if 'pd' in locals() else [s < 0 for s in smoothed], color='red', alpha=0.2, interpolate=True)
+                ax.fill_between(x_perc, smoothed, 0, where=pd.Series(smoothed) > 0, color='green', alpha=0.2, interpolate=True)
+                ax.fill_between(x_perc, smoothed, 0, where=pd.Series(smoothed) < 0, color='red', alpha=0.2, interpolate=True)
                 
                 ax.axhline(0, color='black', linewidth=1, linestyle='--')
                 ax.set_title("Narrative Sentiment Arc", fontsize=14, fontweight='bold')
@@ -137,7 +139,7 @@ if uploaded_file is not None:
                 st.pyplot(fig)
 
     # ==========================================
-    # TAB 3: SOCIAL NETWORK (UPGRADED DESIGN)
+    # TAB 3: SOCIAL NETWORK
     # ==========================================
     with tab3:
         st.header("Social Web & Relationship Dynamics")
@@ -146,19 +148,22 @@ if uploaded_file is not None:
         st.success("**Guiding Questions for Students:**\n- Who is the central 'hub' of the novel? Are there characters isolated on the edges?\n- Look at the red lines: which characters drive the central conflict of the story?\n- Look at the green lines: where are the alliances or romances? Do these align with your reading experience?")
 
         if st.button("Run Network Analysis"):
-            with st.spinner("Extracting characters and computing relationship sentiment..."):
-                doc = nlp(text_data[:500000])
+            with st.spinner("Extracting characters across the full book..."):
+                doc = nlp(text_data)
                 char_counts = Counter()
                 interactions = {}
 
                 for sent in doc.sents:
-                    chars = set([ent.text.replace("'s", "").strip() for ent in sent.ents if ent.label_ == "PERSON" and len(ent.text) > 3])
-                    for char in chars:
+                    # Robust cleanup: Removes standard and typographical apostrophes
+                    raw_chars = [ent.text for ent in sent.ents if ent.label_ == "PERSON" and len(ent.text) > 3]
+                    cleaned_chars = set([re.sub(r"['’]s$", "", char).strip() for char in raw_chars])
+                    
+                    for char in cleaned_chars:
                         char_counts[char] += 1
                     
-                    if len(chars) > 1:
+                    if len(cleaned_chars) > 1:
                         sent_score = sia.polarity_scores(sent.text)['compound']
-                        for c1, c2 in itertools.combinations(chars, 2):
+                        for c1, c2 in itertools.combinations(cleaned_chars, 2):
                             pair = tuple(sorted([c1, c2]))
                             if pair not in interactions:
                                 interactions[pair] = {'weight': 0, 'sentiment': []}
@@ -180,25 +185,20 @@ if uploaded_file is not None:
                         G.add_edge(c1, c2, weight=data['weight'], color=color)
 
                 fig, ax = plt.subplots(figsize=(12, 9))
-                # Better layout algorithm for spacing
                 pos = nx.kamada_kawai_layout(G)
                 
                 sizes = [nx.get_node_attributes(G, 'size')[n] for n in G.nodes()]
                 edge_colors = [nx.get_edge_attributes(G, 'color')[e] for e in G.edges()]
-                # Scale weights for better visual thickness
                 weights = [nx.get_edge_attributes(G, 'weight')[e] for e in G.edges()]
                 max_w = max(weights) if weights else 1
                 scaled_weights = [(w/max_w)*5 + 1 for w in weights]
                 
-                # Draw edges with a sleek curve
                 nx.draw_networkx_edges(G, pos, width=scaled_weights, edge_color=edge_colors, 
                                        alpha=0.6, connectionstyle="arc3,rad=0.1", ax=ax)
                 
-                # Draw nodes with borders
                 nx.draw_networkx_nodes(G, pos, node_size=sizes, node_color='#a6bddb', 
                                        edgecolors='black', linewidths=1.5, ax=ax)
                 
-                # Draw labels with background boxes for readability
                 nx.draw_networkx_labels(G, pos, font_size=11, font_family='sans-serif', font_weight='bold',
                                         bbox=dict(facecolor='white', edgecolor='none', alpha=0.7, pad=1), ax=ax)
                 
@@ -217,7 +217,7 @@ if uploaded_file is not None:
 
         if st.button("Run Gender Analysis"):
             with st.spinner("Analyzing pronouns and verbs..."):
-                doc = nlp(text_data[:500000])
+                doc = nlp(text_data)
                 m_verbs, f_verbs = Counter(), Counter()
                 m_terms = {'he', 'him', 'his'}
                 f_terms = {'she', 'her', 'hers'}
@@ -279,7 +279,6 @@ if uploaded_file is not None:
                     for c_name, count in found_colors.most_common():
                         width = count / total
                         ax.barh(0, width, left=left, color=colors[c_name], edgecolor='black', linewidth=1.5)
-                        # Add percentage label inside the bar if it's wide enough
                         if width > 0.05:
                             ax.text(left + width/2, 0, f"{c_name}\n{int(width*100)}%", 
                                     ha='center', va='center', color='white' if c_name not in ['white', 'yellow', 'gold'] else 'black',
