@@ -76,22 +76,38 @@ def get_chunks(text, chunk_size=50000):
     if current_chunk:
         yield " ".join(current_chunk)
 
-# --- ENTITY CLEANER ---
+# --- STRICT ENTITY CLEANER ---
 def clean_entity_name(text):
-    """Wasstraat voor personagenamen om ruis uit de AI te filteren."""
+    """Zeer agressieve wasstraat voor personagenamen."""
     # 1. Hak af vanaf de bezits-s ("Gatsby's foot" -> "Gatsby")
     text = re.split(r"['’]s\b", text)[0]
     
-    # 2. Verwijder veelvoorkomende titels (Aunt, Mr, Dr, etc.)
+    # 2. Titels verwijderen
     titles = [r'\bMr\.?\s', r'\bMrs\.?\s', r'\bMs\.?\s', r'\bMiss\s', 
-              r'\bDr\.?\s', r'\bAunt\s', r'\bUncle\s', r'\bProfessor\s', r'\bCaptain\s']
+              r'\bDr\.?\s', r'\bAunt\s', r'\bUncle\s', r'\bProfessor\s', 
+              r'\bCaptain\s', r'\bLord\s', r'\bLady\s', r'\bSir\s']
     for t in titles:
         text = re.sub(t, "", text, flags=re.IGNORECASE)
         
-    # 3. Houd alleen woorden over die met een hoofdletter beginnen ("suppose Tom" -> "Tom")
-    words = [w for w in text.split() if w.istitle()]
+    # 3. Zwarte lijst van woorden die AI aanziet voor namen (vaak begin van een zin)
+    ignore_words = {
+        "suppose", "well", "yes", "no", "oh", "ah", "hey", "say", "let", 
+        "come", "look", "see", "think", "know", "don", "maybe", "perhaps", 
+        "suddenly", "then", "now", "and", "but", "or", "so", "why", "what", 
+        "when", "where", "how", "good", "god", "dear", "please", "just"
+    }
     
-    return " ".join(words).strip()
+    words = []
+    for w in text.split():
+        # Moet met een hoofdletter beginnen, EN mag niet in de ignore list zitten
+        if w.istitle() and w.lower() not in ignore_words:
+            words.append(w)
+            
+    clean_name = " ".join(words)
+    # 4. Verwijder alle overgebleven vreemde leestekens (behoud alleen letters en spaties)
+    clean_name = re.sub(r'[^A-Za-z\s]', '', clean_name).strip()
+    
+    return clean_name
 
 # --- SIDEBAR UPLOAD & SETTINGS ---
 st.sidebar.header("1. Upload Book")
@@ -118,7 +134,7 @@ if uploaded_file is not None:
     chunks = list(get_chunks(text_data))
     total_chunks = len(chunks)
     
-    # Reset Social Data if user changes slider
+    # Reset Social Data als de gebruiker de slider aanpast
     current_hash = hash(text_data)
     if st.session_state.get('text_hash') != current_hash:
         if 'social_data' in st.session_state:
@@ -138,6 +154,7 @@ if uploaded_file is not None:
     # ==========================================
     with tab1:
         st.header("Comparative Style Scanner")
+        st.info(f"**Legend:** Analyzing average sentence length over the selected {selected_page_count} pages.")
         if st.button("Run Style Analysis"):
             progress_bar = st.progress(0)
             sent_lengths = []
@@ -151,6 +168,8 @@ if uploaded_file is not None:
 
             if sent_lengths:
                 avg_len = sum(sent_lengths) / len(sent_lengths)
+                st.metric("Average Sentence Length", f"{avg_len:.1f} words")
+                
                 window = max(30, len(sent_lengths) // 100) 
                 smoothed = [sum(sent_lengths[i:i+window])/window for i in range(len(sent_lengths)-window+1)]
                 
@@ -158,6 +177,8 @@ if uploaded_file is not None:
                 ax.plot(smoothed, color='#2b8cbe', linewidth=2)
                 ax.fill_between(range(len(smoothed)), smoothed, color='#2b8cbe', alpha=0.2)
                 ax.set_title("Sentence Length Over Time", fontsize=14, fontweight='bold')
+                ax.set_ylabel("Words per Sentence")
+                ax.set_xlabel("Story Progression (Sentences)")
                 sns.despine()
                 st.pyplot(fig)
                 plt.close(fig)
@@ -169,22 +190,27 @@ if uploaded_file is not None:
     with tab2:
         st.header("The Vonnegut Emotion Arc")
         if st.button("Run Emotion Arc"):
-            sentences = re.split(r'(?<=[.!?]) +', text_data)
-            scores = [sia.polarity_scores(s)['compound'] for s in sentences if len(s) > 10]
-            gc.collect()
+            with st.spinner("Calculating sentiment..."):
+                sentences = re.split(r'(?<=[.!?]) +', text_data)
+                scores = [sia.polarity_scores(s)['compound'] for s in sentences if len(s) > 10]
+                gc.collect()
 
-            if scores:
-                window = max(1, len(scores) // 20)
-                smoothed = [sum(scores[i:i+window])/window for i in range(len(scores)-window+1)]
-                x_perc = [(i / len(smoothed)) * 100 for i in range(len(smoothed))]
-                
-                fig, ax = plt.subplots(figsize=(10, 4))
-                ax.plot(x_perc, smoothed, color='#8856a7', linewidth=2.5)
-                ax.fill_between(x_perc, smoothed, 0, where=pd.Series(smoothed) > 0, color='green', alpha=0.2)
-                ax.fill_between(x_perc, smoothed, 0, where=pd.Series(smoothed) < 0, color='red', alpha=0.2)
-                sns.despine()
-                st.pyplot(fig)
-                plt.close(fig)
+                if scores:
+                    window = max(1, len(scores) // 20)
+                    smoothed = [sum(scores[i:i+window])/window for i in range(len(scores)-window+1)]
+                    x_perc = [(i / len(smoothed)) * 100 for i in range(len(smoothed))]
+                    
+                    fig, ax = plt.subplots(figsize=(10, 4))
+                    ax.plot(x_perc, smoothed, color='#8856a7', linewidth=2.5)
+                    ax.fill_between(x_perc, smoothed, 0, where=pd.Series(smoothed) > 0, color='green', alpha=0.2, interpolate=True)
+                    ax.fill_between(x_perc, smoothed, 0, where=pd.Series(smoothed) < 0, color='red', alpha=0.2, interpolate=True)
+                    ax.axhline(0, color='black', linewidth=1, linestyle='--')
+                    ax.set_title(f"Narrative Sentiment Arc ({selected_page_count} pages)", fontsize=14, fontweight='bold')
+                    ax.set_xlabel("Selected Text Progress (%)")
+                    ax.set_ylabel("Sentiment Score")
+                    sns.despine()
+                    st.pyplot(fig)
+                    plt.close(fig)
 
     # ==========================================
     # TAB 3: SOCIAL NETWORK & RELATIONSHIPS
@@ -192,7 +218,6 @@ if uploaded_file is not None:
     with tab3:
         st.header("Social Web & Relationship Dynamics")
         
-        # Stap 1: Genereer het netwerk
         if st.button("Run Social Analysis"):
             progress_bar = st.progress(0)
             raw_char_counts = Counter()
@@ -202,11 +227,11 @@ if uploaded_file is not None:
                 for sent in doc.sents:
                     raw_chars = [ent.text for ent in sent.ents if ent.label_ == "PERSON" and len(ent.text) > 2]
                     
-                    # Nieuwe aggressieve wasstraat voor entiteiten
+                    # Toepassen van de agressieve schoning
                     cleaned_chars = set()
                     for char in raw_chars:
                         clean_name = clean_entity_name(char)
-                        if len(clean_name) > 2: # Negeer weesletters
+                        if len(clean_name) > 2: 
                             cleaned_chars.add(clean_name)
                     
                     for char in cleaned_chars:
@@ -224,12 +249,13 @@ if uploaded_file is not None:
                 progress_bar.progress((i + 1) / total_chunks)
                 gc.collect()
 
-            # Deduplicatie (Fusie van namen)
+            # Deduplicatie (Slimme Fusie)
             sorted_names = sorted(raw_char_counts.keys(), key=len, reverse=True)
             name_mapping = {}
             for name in sorted_names:
                 mapped = False
                 for longer_name in list(set(name_mapping.values())):
+                    # Controleer of de kortere naam (bijv. "Nick") onderdeel is van de langere ("Nick Carraway")
                     if re.search(r'\b' + re.escape(name) + r'\b', longer_name):
                         name_mapping[name] = longer_name
                         mapped = True
@@ -254,7 +280,7 @@ if uploaded_file is not None:
 
             if char_counts:
                 top_chars = [c for c, count in char_counts.most_common(15)]
-                # Sla op in sessie zodat we er later drop-downs mee kunnen vullen
+                # Sla op in sessie voor de dropdowns en visualisaties
                 st.session_state['social_data'] = {
                     'top_chars': top_chars,
                     'char_counts': char_counts,
@@ -262,7 +288,7 @@ if uploaded_file is not None:
                 }
             progress_bar.empty()
 
-        # Stap 2: Laat het netwerk en de tracker zien als de data beschikbaar is
+        # Render het netwerk als er data is
         if 'social_data' in st.session_state:
             top_chars = st.session_state['social_data']['top_chars']
             char_counts = st.session_state['social_data']['char_counts']
@@ -307,7 +333,6 @@ if uploaded_file is not None:
             st.subheader("📈 Relationship Evolution Tracker")
             st.info("Select two characters from the network above to track their emotional dynamic over time.")
             
-            # Automatische Dropdowns gebaseerd op de netwerkanalyse
             col1, col2 = st.columns(2)
             char1 = col1.selectbox("First Character", top_chars, index=0)
             char2 = col2.selectbox("Second Character", top_chars, index=1 if len(top_chars) > 1 else 0)
@@ -318,7 +343,6 @@ if uploaded_file is not None:
                     progression, sentiments = [], []
 
                     for i, s in enumerate(sentences):
-                        # Simpele check: de eerste naam (bijv 'Tom') van de volle naam moet in de zin staan
                         c1_base = char1.split()[0]
                         c2_base = char2.split()[0]
                         
@@ -337,22 +361,115 @@ if uploaded_file is not None:
                         sns.regplot(data=df, x='Progress', y='Sentiment', scatter=False, order=3, color='#e41a1c')
                         ax.axhline(0, color='black', linewidth=1, linestyle='--')
                         ax.set_title(f"Relationship Evolution: {char1} & {char2}", fontsize=14, fontweight='bold')
+                        ax.set_xlabel("Selected Text Progress (%)")
+                        ax.set_ylabel("Interaction Sentiment (-1 to +1)")
                         sns.despine()
                         st.pyplot(fig)
                         plt.close(fig)
 
     # ==========================================
-    # TAB 4 & 5 (Verkorte versies voor code overzicht)
+    # TAB 4: GENDER BIAS
     # ==========================================
     with tab4:
         st.header("Gender-Bias Agency Scanner")
-        st.info("Run this scanner to compare verb usage.")
-        # Code voor Tab 4 blijft identiek
+        st.info("**Legend:** Top 10 verbs directly associated with male vs female entities. Neutral verbs ('turn', 'go') are filtered out.")
 
+        if st.button("Run Gender Analysis"):
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            m_verbs, f_verbs = Counter(), Counter()
+            m_terms = {'he', 'him', 'his', 'man', 'men', 'boy', 'boys', 'father', 'brother', 'husband', 'uncle', 'gentleman'}
+            f_terms = {'she', 'her', 'hers', 'woman', 'women', 'girl', 'girls', 'mother', 'sister', 'wife', 'aunt', 'lady'}
+            stop_v = {
+                'be', 'have', 'do', 'go', 'get', 'know', 'think', 'say', 'see', 'look', 
+                'come', 'tell', 'ask', 'seem', 'turn', 'move', 'start', 'begin', 'stop', 
+                'use', 'try', 'feel', 'leave', 'make', 'take', 'give', 'find', 'call', 
+                'want', 'let', 'put', 'keep', 'show', 'hold', 'bring', 'become', 'mean'
+            }
+
+            for i, doc in enumerate(nlp.pipe(chunks, disable=["ner", "textcat", "custom"])):
+                for token in doc:
+                    if token.dep_ == "nsubj" and token.head.pos_ == "VERB":
+                        subj = token.text.lower()
+                        verb = token.head.lemma_.lower()
+                        if verb not in stop_v and len(verb) > 2:
+                            if subj in m_terms: 
+                                m_verbs[verb] += 1
+                            elif subj in f_terms: 
+                                f_verbs[verb] += 1
+                
+                progress_bar.progress((i + 1) / total_chunks)
+                status_text.text(f"Scanning grammar: chunk {i + 1} of {total_chunks}...")
+                gc.collect()
+
+            status_text.text("Generating visual...")
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+            
+            if m_verbs:
+                v, c = zip(*m_verbs.most_common(10))
+                sns.barplot(x=list(c), y=list(v), ax=ax1, color='#3182bd')
+                ax1.set_title("Top Male Actions", fontsize=12, fontweight='bold')
+                ax1.set_xlabel("Frequency")
+            
+            if f_verbs:
+                v, c = zip(*f_verbs.most_common(10))
+                sns.barplot(x=list(c), y=list(v), ax=ax2, color='#e6550d')
+                ax2.set_title("Top Female Actions", fontsize=12, fontweight='bold')
+                ax2.set_xlabel("Frequency")
+            
+            sns.despine()
+            plt.tight_layout()
+            st.pyplot(fig)
+            plt.close(fig)
+            
+            progress_bar.empty()
+            status_text.empty()
+
+    # ==========================================
+    # TAB 5: COLOR PALETTE
+    # ==========================================
     with tab5:
         st.header("The Aesthetic Color Palette")
-        st.info("Extract color mentions.")
-        # Code voor Tab 5 blijft identiek
+        st.info("**Legend:** Proportion of how often specific colors are explicitly mentioned.")
+
+        if st.button("Extract Colors"):
+            with st.spinner("Scanning for aesthetic keywords..."):
+                colors = {
+                    'red': '#e41a1c', 'crimson': '#bd0026', 'blue': '#377eb8', 
+                    'green': '#4daf4a', 'yellow': '#dede00', 'gold': '#ff7f00', 
+                    'white': '#f0f0f0', 'black': '#252525', 'grey': '#969696', 'gray': '#969696',
+                    'pink': '#f781bf', 'purple': '#984ea3', 'brown': '#a65628'
+                }
+                found_colors = Counter()
+                words = re.findall(r'\b[a-zA-Z]+\b', text_data.lower())
+                for w in words:
+                    if w in colors:
+                        found_colors[w] += 1
+                
+                gc.collect()
+
+                if found_colors:
+                    total = sum(found_colors.values())
+                    fig, ax = plt.subplots(figsize=(10, 2))
+                    left = 0
+                    for c_name, count in found_colors.most_common():
+                        width = count / total
+                        ax.barh(0, width, left=left, color=colors[c_name], edgecolor='black', linewidth=1.5)
+                        if width > 0.05:
+                            ax.text(left + width/2, 0, f"{c_name}\n{int(width*100)}%", 
+                                    ha='center', va='center', color='white' if c_name not in ['white', 'yellow', 'gold', 'f0f0f0'] else 'black',
+                                    fontweight='bold', fontsize=10)
+                        left += width
+                        
+                    ax.set_yticks([])
+                    ax.set_xticks([])
+                    ax.set_title("Novel Aesthetic Proportion", fontsize=14, fontweight='bold')
+                    sns.despine(left=True, bottom=True)
+                    st.pyplot(fig)
+                    plt.close(fig)
+                else:
+                    st.write("No strong color palette detected in this excerpt.")
 
 else:
     st.info("Please upload a PDF file in the sidebar to begin.")
