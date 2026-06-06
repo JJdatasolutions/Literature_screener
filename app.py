@@ -43,7 +43,6 @@ def load_models():
             
         nlp = spacy.load("en_core_web_sm")
     
-    # We voegen een lichte zinnen-splitser toe om de zware 'parser' te kunnen omzeilen bij de netwerkanalyse
     if "sentencizer" not in nlp.pipe_names:
         nlp.add_pipe("sentencizer")
         
@@ -65,7 +64,6 @@ def extract_text(file_buffer):
 
 # --- MEMORY SAFE CHUNKING WITH PROGRESS ---
 def get_chunks(text, chunk_size=50000):
-    """Hak tekst in nog kleinere stukken (50k ipv 100k) voor absolute veiligheid."""
     words = text.split()
     current_chunk = []
     current_length = 0
@@ -86,7 +84,7 @@ uploaded_file = st.sidebar.file_uploader("Choose a PDF file", type="pdf")
 if uploaded_file is not None:
     with st.spinner("Extracting full text from PDF..."):
         text_data = extract_text(uploaded_file)
-        chunks = list(get_chunks(text_data)) # Sla chunks lokaal op om voortgang te kunnen meten
+        chunks = list(get_chunks(text_data))
         total_chunks = len(chunks)
     
     # Create Tabs
@@ -104,21 +102,19 @@ if uploaded_file is not None:
     with tab1:
         st.header("Comparative Style Scanner")
         st.info("**Legend:** The blue line represents the average length of sentences over a rolling window. High peaks mean long, complex sentences. Deep valleys mean short, punchy sentences.")
-        st.success("**Guiding Questions for Students:**\n- Where does the author use short, punchy sentences? Does this correlate with action sequences or dialogue?\n- Where are the peaks? Do these long sentences indicate heavy description, philosophical thoughts, or a 'stream of consciousness'?")
+        st.success("**Guiding Questions for Students:**\n- Where does the author use short, punchy sentences? Does this correlate with action sequences or dialogue?")
 
         if st.button("Run Style Analysis"):
             progress_bar = st.progress(0)
             status_text = st.empty()
             sent_lengths = []
             
-            # Disable NER en andere zware modules die we niet nodig hebben voor zinslengte
             for i, doc in enumerate(nlp.pipe(chunks, disable=["ner", "lemmatizer", "textcat", "custom"])):
                 for s in doc.sents:
                     length = len([t for t in s if not t.is_punct])
                     if length > 2:
                         sent_lengths.append(length)
                 
-                # Update UI om timeout te voorkomen en ruim geheugen op
                 progress_bar.progress((i + 1) / total_chunks)
                 status_text.text(f"Processing chunk {i + 1} of {total_chunks}...")
                 gc.collect()
@@ -149,18 +145,16 @@ if uploaded_file is not None:
     with tab2:
         st.header("The Vonnegut Emotion Arc")
         st.info("**Legend:** The Y-axis represents the emotional tone (-1 is extreme negativity, +1 is extreme positivity). The X-axis represents the progression of the book.")
-        st.success("**Guiding Questions for Students:**\n- Where is the lowest point (the darkest moment) of the story? What happens in the plot at this exact percentage?\n- According to Kurt Vonnegut, stories have emotional 'shapes' (like 'Man in Hole' or 'Boy Meets Girl'). What shape is this novel?")
 
         if st.button("Run Emotion Arc"):
             with st.spinner("Calculating sentiment..."):
-                # Geen SpaCy nodig hier, puur Python regex (super snel)
                 sentences = re.split(r'(?<=[.!?]) +', text_data)
                 scores = []
                 for s in sentences:
                     if len(s) > 10:
                         scores.append(sia.polarity_scores(s)['compound'])
                 
-                gc.collect() # Clean up
+                gc.collect()
 
                 if scores:
                     window = max(1, len(scores) // 20)
@@ -182,75 +176,128 @@ if uploaded_file is not None:
                     plt.close(fig)
 
     # ==========================================
-    # TAB 3: SOCIAL NETWORK
+    # TAB 3: SOCIAL NETWORK (UPDATED WITH FUSION & PRETTIER STYLES)
     # ==========================================
     with tab3:
         st.header("Social Web & Relationship Dynamics")
-        st.info("**Legend:**\n- **Node Size:** Mentions.\n- **Edge Thickness:** Interactions.\n- **Edge Color:** Green = Positive, Red = Negative.")
-        st.success("**Guiding Questions for Students:**\n- Who is the central 'hub' of the novel? Are there characters isolated on the edges?\n- Look at the red lines: which characters drive the central conflict of the story?")
+        st.info("**Legend:**\n- **Node Size & Color:** Mentions (Darker/Larger = More frequent).\n- **Edge Thickness:** Interaction frequency.\n- **Edge Color:** **Green** = Positive, **Red** = Negative, **Grey** = Neutral.")
+        st.success("**Guiding Questions for Students:**\n- Who is the central 'hub' of the novel? Are there characters isolated on the edges?")
 
         if st.button("Run Network Analysis"):
             progress_bar = st.progress(0)
             status_text = st.empty()
-            char_counts = Counter()
-            interactions = {}
+            raw_char_counts = Counter()
+            raw_interactions = {}
 
-            # Disable tagger, parser, and lemmatizer. We ONLY need NER (Named Entity Recognition) and the light sentencizer.
+            # Stap 1: Extraheer entiteiten via NLP
             for i, doc in enumerate(nlp.pipe(chunks, disable=["tagger", "parser", "lemmatizer", "textcat", "custom"])):
                 for sent in doc.sents:
-                    raw_chars = [ent.text for ent in sent.ents if ent.label_ == "PERSON" and len(ent.text) > 3]
+                    raw_chars = [ent.text for ent in sent.ents if ent.label_ == "PERSON" and len(ent.text) > 2]
+                    # Direct opschonen van apostrofes
                     cleaned_chars = set([re.sub(r"['’]s$", "", char).strip() for char in raw_chars])
                     
                     for char in cleaned_chars:
-                        char_counts[char] += 1
+                        raw_char_counts[char] += 1
                     
                     if len(cleaned_chars) > 1:
                         sent_score = sia.polarity_scores(sent.text)['compound']
                         for c1, c2 in itertools.combinations(cleaned_chars, 2):
                             pair = tuple(sorted([c1, c2]))
-                            if pair not in interactions:
-                                interactions[pair] = {'weight': 0, 'sentiment': []}
-                            interactions[pair]['weight'] += 1
-                            interactions[pair]['sentiment'].append(sent_score)
+                            if pair not in raw_interactions:
+                                raw_interactions[pair] = {'weight': 0, 'sentiment': []}
+                            raw_interactions[pair]['weight'] += 1
+                            raw_interactions[pair]['sentiment'].append(sent_score)
                 
                 progress_bar.progress((i + 1) / total_chunks)
                 status_text.text(f"Extracting entities: chunk {i + 1} of {total_chunks}...")
                 gc.collect()
 
-            status_text.text("Drawing the network... (This might take a moment for large webs)")
+            status_text.text("Merging character aliases (e.g., Tom -> Tom Buchanan)...")
+            
+            # Stap 2: Slimme naam-fusie (Deduplicatie)
+            sorted_names = sorted(raw_char_counts.keys(), key=len, reverse=True)
+            name_mapping = {}
+            for name in sorted_names:
+                if len(name) < 3: continue
+                mapped = False
+                for longer_name in list(set(name_mapping.values())):
+                    # Controleer of 'Tom' een op zichzelf staand woord is in 'Tom Buchanan'
+                    if re.search(r'\b' + re.escape(name) + r'\b', longer_name):
+                        name_mapping[name] = longer_name
+                        mapped = True
+                        break
+                if not mapped:
+                    name_mapping[name] = name
+
+            # Herbouw tellingen op basis van de fusie
+            char_counts = Counter()
+            for name, count in raw_char_counts.items():
+                char_counts[name_mapping.get(name, name)] += count
+
+            # Herbouw interacties op basis van de fusie
+            interactions = {}
+            for (c1, c2), data in raw_interactions.items():
+                m1 = name_mapping.get(c1, c1)
+                m2 = name_mapping.get(c2, c2)
+                if m1 != m2: # Voorkom dat een personage met zichzelf praat na fusie
+                    pair = tuple(sorted([m1, m2]))
+                    if pair not in interactions:
+                        interactions[pair] = {'weight': 0, 'sentiment': []}
+                    interactions[pair]['weight'] += data['weight']
+                    interactions[pair]['sentiment'].extend(data['sentiment'])
+
+            status_text.text("Building the aesthetic network visualization...")
+            
+            # Stap 3: Teken het geüpgradede netwerk
             if char_counts:
                 top_chars = [c for c, count in char_counts.most_common(15)]
                 G = nx.Graph()
                 
                 for char in top_chars:
-                    G.add_node(char, size=char_counts[char]*60)
+                    G.add_node(char, weight=char_counts[char])
                     
                 for (c1, c2), data in interactions.items():
                     if c1 in top_chars and c2 in top_chars:
-                        avg_sent = sum(data['sentiment']) / len(data['sentiment'])
-                        if avg_sent > 0.1: color = '#2ca02c'
-                        elif avg_sent < -0.1: color = '#d62728'
-                        else: color = '#b0b0b0'
+                        avg_sent = sum(data['sentiment']) / len(data['sentiment']) if data['sentiment'] else 0
+                        if avg_sent > 0.15: color = '#2ec4b6'  # Modern groen/teal
+                        elif avg_sent < -0.15: color = '#e71d36' # Modern intens rood
+                        else: color = '#cccccc'  # Neutraal grijs
                         G.add_edge(c1, c2, weight=data['weight'], color=color)
 
                 if len(G.nodes) > 0:
-                    fig, ax = plt.subplots(figsize=(12, 9))
-                    pos = nx.kamada_kawai_layout(G)
+                    fig, ax = plt.subplots(figsize=(14, 10), facecolor='#fafafa')
+                    ax.set_facecolor('#fafafa')
                     
-                    sizes = [nx.get_node_attributes(G, 'size')[n] for n in G.nodes()]
+                    # Spring layout met verhoogde k-waarde zorgt voor een prachtig ruimtelijke spreiding
+                    pos = nx.spring_layout(G, k=0.8, iterations=60, seed=42)
+                    
+                    # Schaal bollen op basis van gewicht
+                    node_weights = [nx.get_node_attributes(G, 'weight')[n] for n in G.nodes()]
+                    max_node_w = max(node_weights) if node_weights else 1
+                    node_sizes = [(w / max_node_w) * 2200 + 400 for w in node_weights]
+                    
+                    # Schaal lijndikten
                     edge_colors = [nx.get_edge_attributes(G, 'color')[e] for e in G.edges()]
                     weights = [nx.get_edge_attributes(G, 'weight')[e] for e in G.edges()]
-                    max_w = max(weights) if weights else 1
-                    scaled_weights = [(w/max_w)*5 + 1 for w in weights]
+                    max_edge_w = max(weights) if weights else 1
+                    scaled_edge_widths = [(w / max_edge_w) * 6 + 1.5 for w in weights]
                     
-                    nx.draw_networkx_edges(G, pos, width=scaled_weights, edge_color=edge_colors, 
-                                        alpha=0.6, connectionstyle="arc3,rad=0.1", ax=ax)
-                    nx.draw_networkx_nodes(G, pos, node_size=sizes, node_color='#a6bddb', 
-                                        edgecolors='black', linewidths=1.5, ax=ax)
+                    # Teken subtiel gebogen verbindingen
+                    nx.draw_networkx_edges(G, pos, width=scaled_edge_widths, edge_color=edge_colors, 
+                                        alpha=0.4, connectionstyle="arc3,rad=0.2", ax=ax)
+                    
+                    # Teken nodes met een prachtig blauw kleurverloop (Cmap)
+                    nx.draw_networkx_nodes(G, pos, node_size=node_sizes, 
+                                        node_color=node_weights, cmap=plt.cm.Blues,
+                                        edgecolors='#1e3d59', linewidths=1.8, ax=ax)
+                    
+                    # Teken de verfraaide afgeronde naamkaartjes (high readability)
                     nx.draw_networkx_labels(G, pos, font_size=11, font_family='sans-serif', font_weight='bold',
-                                            bbox=dict(facecolor='white', edgecolor='none', alpha=0.7, pad=1), ax=ax)
+                                            font_color='#1e3d59',
+                                            bbox=dict(facecolor='#ffffff', edgecolor='#1e3d59', alpha=0.9, 
+                                                      boxstyle='round,pad=0.3', linewidth=1), ax=ax)
                     
-                    ax.set_title("Character Interaction Network", fontsize=16, fontweight='bold')
+                    ax.set_title("✨ Dynamic Character Interaction Network", fontsize=18, fontweight='bold', color='#1e3d59', pad=20)
                     plt.axis('off')
                     st.pyplot(fig)
                     plt.close(fig)
@@ -264,7 +311,6 @@ if uploaded_file is not None:
     with tab4:
         st.header("Gender-Bias Agency Scanner")
         st.info("**Legend:** Top 10 verbs directly associated with male vs female entities. Neutral verbs ('turn', 'go') are filtered out.")
-        st.success("**Guiding Questions for Students:**\n- Are male characters assigned more active, aggressive, or physical verbs? \n- Are female characters associated with passive, emotional, or reactive verbs?")
 
         if st.button("Run Gender Analysis"):
             progress_bar = st.progress(0)
@@ -280,7 +326,6 @@ if uploaded_file is not None:
                 'want', 'let', 'put', 'keep', 'show', 'hold', 'bring', 'become', 'mean'
             }
 
-            # Disable NER, we only need syntax parsing and tagging here
             for i, doc in enumerate(nlp.pipe(chunks, disable=["ner", "textcat", "custom"])):
                 for token in doc:
                     if token.dep_ == "nsubj" and token.head.pos_ == "VERB":
@@ -325,7 +370,6 @@ if uploaded_file is not None:
     with tab5:
         st.header("The Aesthetic Color Palette")
         st.info("**Legend:** Proportion of how often specific colors are explicitly mentioned.")
-        st.success("**Guiding Questions for Students:**\n- What is the dominant aesthetic or atmosphere based on these colors?\n- Do certain colors carry symbolic meaning in this novel?")
 
         if st.button("Extract Colors"):
             with st.spinner("Scanning for aesthetic keywords..."):
