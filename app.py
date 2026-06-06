@@ -17,17 +17,16 @@ st.markdown("Upload a novel (PDF) and let AI uncover its hidden structures.")
 # --- CACHING MODELS & DATA ---
 @st.cache_resource
 def load_models():
-    # Download NLTK data if needed (VADER handles its own lexicon, but good practice)
+    # Download NLTK data if needed 
     nltk.download('punkt', quiet=True)
-    # Load Spacy
-    try:
-        nlp = spacy.load("en_core_web_sm")
-    except OSError:
-        import os
-        os.system("python -m spacy download en_core_web_sm")
-        nlp = spacy.load("en_core_web_sm")
+    
+    # Load Spacy (now safely pre-installed via requirements.txt)
+    nlp = spacy.load("en_core_web_sm")
     nlp.max_length = 2000000
+    
+    # Load VADER for sentiment analysis
     sia = SentimentIntensityAnalyzer()
+    
     return nlp, sia
 
 nlp, sia = load_models()
@@ -51,7 +50,7 @@ if uploaded_file is not None:
     with st.spinner("Extracting text from PDF..."):
         text_data = extract_text(uploaded_file, max_pages=max_p)
     
-    # Create Tabs
+    # Create Tabs for the 6 different tools
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "1. Style Scanner", 
         "2. Emotion Arc", 
@@ -75,7 +74,7 @@ if uploaded_file is not None:
                 
                 st.metric("Average Sentence Length", f"{avg_len:.1f} words")
                 
-                # Plot
+                # Plot moving average of sentence length
                 window = 30
                 smoothed = [sum(sent_lengths[i:i+window])/window for i in range(len(sent_lengths)-window+1)]
                 fig, ax = plt.subplots(figsize=(10, 4))
@@ -249,12 +248,12 @@ if uploaded_file is not None:
                 top_words = [w for w, c in Counter(candidates).most_common(5)]
                 
                 fig, ax = plt.subplots(figsize=(10, 5))
-                colors = ['#e6194B', '#3cb44b', '#f58231', '#4363d8', '#911eb4']
+                bar_colors = ['#e6194B', '#3cb44b', '#f58231', '#4363d8', '#911eb4']
                 
                 for i, word in enumerate(top_words):
                     positions = [(idx/len(lemmas))*100 for idx, val in enumerate(lemmas) if val == word]
                     y_pos = len(top_words) - i
-                    ax.vlines(positions, y_pos - 0.4, y_pos + 0.4, color=colors[i], alpha=0.7)
+                    ax.vlines(positions, y_pos - 0.4, y_pos + 0.4, color=bar_colors[i], alpha=0.7)
 
                 ax.set_yticks([len(top_words) - i for i in range(len(top_words))])
                 ax.set_yticklabels([w.capitalize() for w in top_words])
