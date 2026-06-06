@@ -3,6 +3,7 @@ PyPDF2
 spacy
 nltk
 networkx
+scipy
 matplotlib
 seaborn
 vaderSentiment
