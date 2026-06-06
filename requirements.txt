@@ -1,8 +1,7 @@
 streamlit
 PyPDF2
-spacy==3.7.2
+spacy
 nltk
 networkx
 matplotlib
 vaderSentiment
-https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1.tar.gz#egg=en_core_web_sm
