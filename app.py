@@ -1,6 +1,7 @@
 import streamlit as st
 import PyPDF2
 import spacy
+from spacy.cli import download
 import nltk
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import networkx as nx
@@ -15,20 +16,27 @@ st.title("📚 The Ultimate Literary Analysis Dashboard")
 st.markdown("Upload a novel (PDF) and let AI uncover its hidden structures.")
 
 # --- CACHING MODELS & DATA ---
-@st.cache_resource
+@st.cache_resource(show_spinner="Loading AI models (first time takes a minute)...")
 def load_models():
-    # Download NLTK data if needed 
+    # 1. Download NLTK data if needed 
     nltk.download('punkt', quiet=True)
     
-    # Load Spacy (now safely pre-installed via requirements.txt)
-    nlp = spacy.load("en_core_web_sm")
+    # 2. Slimme Spacy lader
+    try:
+        nlp = spacy.load("en_core_web_sm")
+    except OSError:
+        # Als hij crasht omdat het model ontbreekt, downloaden we het via de code zelf!
+        download("en_core_web_sm")
+        nlp = spacy.load("en_core_web_sm")
+        
     nlp.max_length = 2000000
     
-    # Load VADER for sentiment analysis
+    # 3. Load VADER for sentiment analysis
     sia = SentimentIntensityAnalyzer()
     
     return nlp, sia
 
+# Modellen inladen
 nlp, sia = load_models()
 
 @st.cache_data
