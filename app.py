@@ -3,6 +3,8 @@ import PyPDF2
 import spacy
 import networkx as nx
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+import plotly.express as px
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from collections import Counter
 import pandas as pd
@@ -11,14 +13,15 @@ import re
 import sys
 import os
 import subprocess
+import gc
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="Literary Analysis Dashboard", layout="wide")
+st.set_page_config(page_title="Scientific Literary Dashboard", layout="wide", initial_sidebar_state="expanded")
 st.title("📚 Scientific Literary Analysis Dashboard")
-st.markdown("A comprehensive tool for 12th-grade Modern Languages students to analyze literature through data.")
+st.markdown("A comprehensive, data-driven tool for 12th-grade Modern Languages students to analyze literature.")
 
 # --- CACHING MODELS & NLP SETUP ---
-@st.cache_resource(show_spinner="Loading NLP Models (This may take a moment on first run)...")
+@st.cache_resource(show_spinner="Loading AI Models (This may take a moment on first run)...")
 def load_models():
     """Loads spaCy and VADER models securely."""
     try:
@@ -28,10 +31,7 @@ def load_models():
         subprocess.check_call([sys.executable, "-m", "spacy", "download", "en_core_web_sm"])
         nlp = spacy.load("en_core_web_sm")
     
-    # Increase max length for full books
     nlp.max_length = 2500000 
-    
-    # Add sentencizer for faster sentence boundary detection
     if "sentencizer" not in nlp.pipe_names:
         nlp.add_pipe("sentencizer")
         
@@ -59,8 +59,7 @@ def extract_pdf_pages(file_buffer):
 def count_syllables(word):
     """Simple heuristic to count syllables for Flesch-Kincaid."""
     word = word.lower()
-    if len(word) <= 3:
-        return 1
+    if len(word) <= 3: return 1
     word = re.sub(r'(?:[^laeiouy]es|ed|[^laeiouy]e)$', '', word)
     word = re.sub(r'^y', '', word)
     matches = re.findall(r'[aeiouy]{1,2}', word)
@@ -69,134 +68,184 @@ def count_syllables(word):
 def clean_entity_name(name):
     """Cleans up character names (removes titles and possessives)."""
     name = re.sub(r"['’]s\b", "", name, flags=re.IGNORECASE)
-    name = re.sub(r'\b(Mr\.|Mrs\.|Ms\.|Dr\.|Lord|Lady|Miss)\s', '', name, flags=re.IGNORECASE)
-    return name.strip()
+    name = re.sub(r'\b(Mr\.|Mrs\.|Ms\.|Dr\.|Lord|Lady|Miss|Uncle|Aunt|Sir)\s', '', name, flags=re.IGNORECASE)
+    # Filter out sentence starters that spaCy mistakenly grabs
+    blacklist = ["Suppose", "Suddenly", "Well", "Yes", "Oh", "And", "But", "Then"]
+    words = name.split()
+    if words and words[0] in blacklist:
+        words.pop(0)
+    return " ".join(words).strip()
 
 # --- SIDEBAR: FILE UPLOAD ---
 st.sidebar.header("1. Upload Literature")
-uploaded_file = st.sidebar.file_uploader("Upload an English novel/text (PDF format)", type="pdf")
+uploaded_file = st.sidebar.file_uploader("Upload an English novel/text (PDF)", type="pdf")
 
 if uploaded_file is not None:
-    with st.spinner("Extracting text from PDF..."):
+    with st.spinner("Extracting and structuring text..."):
         pdf_pages = extract_pdf_pages(uploaded_file)
         total_pages = len(pdf_pages)
-        full_text = " ".join(pdf_pages)
     
     st.sidebar.success(f"Successfully loaded {total_pages} pages.")
     
-    # Optional: Limit analysis scope for performance
     st.sidebar.markdown("---")
+    st.sidebar.header("2. Analysis Scope")
     max_pages = st.sidebar.slider("Pages to analyze (Limit to avoid memory overload)", 
-                                  min_value=1, max_value=total_pages, value=min(total_pages, 50))
+                                  min_value=1, max_value=total_pages, value=min(total_pages, 80))
     
     analyzed_pages = pdf_pages[:max_pages]
     analyzed_text = " ".join(analyzed_pages)
+    
+    # Pre-calculate sentences for character tracking
+    sentences = re.split(r'(?<=[.!?]) +', analyzed_text)
 
     # --- TABS CREATION ---
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "🕸️ 1. Network & Narrative Arc", 
-        "🧠 2. Thematic Analysis", 
-        "📐 3. Linguistic Style & Register", 
-        "🤔 4. AI Reflection & Evaluation"
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "🕸️ 1. Character Network", 
+        "📈 2. Narrative Arc", 
+        "🎭 3. Character Emotions",
+        "🧠 4. Themes", 
+        "📐 5. Style & Register", 
+        "🤔 6. AI Reflection"
     ])
 
     # ==========================================
-    # TAB 1: CHARACTER NETWORK & NARRATIVE ARC
+    # TAB 1: CHARACTER NETWORK
     # ==========================================
     with tab1:
-        st.header("Character Network & Narrative Sentiment Arc")
+        st.header("Social Interaction Network")
+        st.markdown("Maps out which characters frequently appear together in the same sentences.")
         
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("Narrative Sentiment Arc")
-            st.info("Displays the emotional trajectory (positive vs. negative) across the selected pages.")
-            
-            if st.button("Generate Narrative Arc"):
-                with st.spinner("Calculating sentiment per page..."):
-                    page_scores = []
-                    for i, page_text in enumerate(analyzed_pages):
-                        score = sia.polarity_scores(page_text)['compound']
-                        page_scores.append(score)
+        if st.button("Generate Character Network", key="btn_network"):
+            with st.spinner("Extracting entities and building network..."):
+                interactions = Counter()
+                char_counts = Counter()
+                
+                doc = nlp(analyzed_text[:1000000]) # Cap for safety
+                
+                for sent in doc.sents:
+                    chars_in_sent = set()
+                    for ent in sent.ents:
+                        if ent.label_ == "PERSON" and len(ent.text.split()) < 4:
+                            clean_name = clean_entity_name(ent.text)
+                            if len(clean_name) > 2 and clean_name.istitle():
+                                chars_in_sent.add(clean_name)
                     
-                    fig, ax = plt.subplots(figsize=(8, 4))
-                    ax.plot(range(1, len(page_scores) + 1), page_scores, color='#8856a7', marker='o', linestyle='-', markersize=4)
-                    ax.axhline(0, color='black', linewidth=1, linestyle='--')
-                    ax.set_xlabel("Page Number")
-                    ax.set_ylabel("Sentiment (Compound Score)")
-                    ax.set_title("Emotional Arc of the Text")
-                    ax.grid(True, alpha=0.3)
+                    for char in chars_in_sent:
+                        char_counts[char] += 1
+                        
+                    if len(chars_in_sent) > 1:
+                        for c1, c2 in itertools.combinations(sorted(chars_in_sent), 2):
+                            interactions[(c1, c2)] += 1
+                            
+                top_chars = [c for c, count in char_counts.most_common(15)]
+                st.session_state['top_chars'] = top_chars # Save for Tab 3
+                
+                G = nx.Graph()
+                for char in top_chars:
+                    G.add_node(char, size=char_counts[char])
+                    
+                for (c1, c2), weight in interactions.items():
+                    if c1 in top_chars and c2 in top_chars:
+                        G.add_edge(c1, c2, weight=weight)
+                        
+                if len(G.nodes) > 0:
+                    fig, ax = plt.subplots(figsize=(10, 7), facecolor='#f8f9fa')
+                    pos = nx.spring_layout(G, k=0.6, seed=42)
+                    
+                    node_sizes = [nx.get_node_attributes(G, 'size')[n] * 60 for n in G.nodes()]
+                    edge_widths = [nx.get_edge_attributes(G, 'weight')[e] * 0.8 for e in G.edges()]
+                    
+                    nx.draw_networkx_nodes(G, pos, node_size=node_sizes, node_color='#4cc9f0', edgecolors='#3a0ca3', linewidths=2, ax=ax)
+                    nx.draw_networkx_edges(G, pos, width=edge_widths, edge_color='#b5179e', alpha=0.4, ax=ax)
+                    nx.draw_networkx_labels(G, pos, font_size=10, font_family="sans-serif", font_weight="bold", ax=ax,
+                                            bbox=dict(facecolor='white', edgecolor='none', alpha=0.7, boxstyle='round,pad=0.2'))
+                    
+                    ax.axis("off")
                     st.pyplot(fig)
                     plt.close(fig)
-
-        with col2:
-            st.subheader("Character Interaction Map")
-            st.info("Maps out which characters frequently appear together in the same sentences.")
-            
-            if st.button("Generate Character Network"):
-                with st.spinner("Extracting entities and building network..."):
-                    interactions = Counter()
-                    char_counts = Counter()
-                    
-                    # Process text in chunks to manage memory
-                    doc = nlp(analyzed_text[:1000000]) # Cap at 1M chars for safety
-                    
-                    for sent in doc.sents:
-                        chars_in_sent = set()
-                        for ent in sent.ents:
-                            if ent.label_ == "PERSON" and len(ent.text.split()) < 4:
-                                clean_name = clean_entity_name(ent.text)
-                                if len(clean_name) > 2 and clean_name.istitle():
-                                    chars_in_sent.add(clean_name)
-                        
-                        for char in chars_in_sent:
-                            char_counts[char] += 1
-                            
-                        if len(chars_in_sent) > 1:
-                            for c1, c2 in itertools.combinations(sorted(chars_in_sent), 2):
-                                interactions[(c1, c2)] += 1
-                                
-                    # Filter top characters
-                    top_chars = [c for c, count in char_counts.most_common(15)]
-                    
-                    G = nx.Graph()
-                    for char in top_chars:
-                        G.add_node(char, size=char_counts[char])
-                        
-                    for (c1, c2), weight in interactions.items():
-                        if c1 in top_chars and c2 in top_chars:
-                            G.add_edge(c1, c2, weight=weight)
-                            
-                    if len(G.nodes) > 0:
-                        fig, ax = plt.subplots(figsize=(8, 6))
-                        pos = nx.spring_layout(G, k=0.5, seed=42)
-                        
-                        node_sizes = [nx.get_node_attributes(G, 'size')[n] * 50 for n in G.nodes()]
-                        edge_widths = [nx.get_edge_attributes(G, 'weight')[e] * 0.5 for e in G.edges()]
-                        
-                        nx.draw_networkx_nodes(G, pos, node_size=node_sizes, node_color='#a8dadc', edgecolors='#1d3557', ax=ax)
-                        nx.draw_networkx_edges(G, pos, width=edge_widths, alpha=0.5, ax=ax)
-                        nx.draw_networkx_labels(G, pos, font_size=9, font_weight="bold", ax=ax)
-                        
-                        ax.axis("off")
-                        st.pyplot(fig)
-                        plt.close(fig)
-                    else:
-                        st.warning("Not enough character interactions found in the selected text.")
+                else:
+                    st.warning("Not enough character interactions found.")
 
     # ==========================================
-    # TAB 2: THEMATIC ANALYSIS
+    # TAB 2: NARRATIVE ARC
     # ==========================================
     with tab2:
-        st.header("Thematic Analysis (Lemmatization)")
-        st.markdown("**Objective:** Discover the core themes of the text by filtering out grammatical noise and focusing on semantically rich words (Nouns, Verbs, Adjectives).")
+        st.header("Global Narrative Sentiment Arc")
+        st.markdown("Displays the emotional trajectory (positive vs. negative) across the selected pages using Plotly.")
         
-        if st.button("Analyze Themes"):
+        if st.button("Generate Narrative Arc", key="btn_arc"):
+            with st.spinner("Calculating sentiment per page..."):
+                page_scores = []
+                for page_text in analyzed_pages:
+                    score = sia.polarity_scores(page_text)['compound']
+                    page_scores.append(score)
+                
+                df_arc = pd.DataFrame({'Page': range(1, len(page_scores) + 1), 'Sentiment': page_scores})
+                
+                # Plotly Interactive Line Chart
+                fig = px.line(df_arc, x='Page', y='Sentiment', title="Overall Emotional Arc of the Text",
+                              markers=True, template="plotly_white", 
+                              color_discrete_sequence=['#4361ee'])
+                fig.update_layout(yaxis_title="Sentiment (Compound Score)", xaxis_title="Page Number")
+                fig.add_hline(y=0, line_dash="dash", line_color="black", annotation_text="Neutral Line")
+                fig.update_traces(line=dict(width=3), marker=dict(size=8))
+                
+                st.plotly_chart(fig, use_container_width=True)
+
+    # ==========================================
+    # TAB 3: CHARACTER EMOTIONS (NEW)
+    # ==========================================
+    with tab3:
+        st.header("Character Emotion Evolution")
+        st.markdown("Trace the internal emotions or the language used directly around specific characters.")
+        
+        if 'top_chars' in st.session_state and len(st.session_state['top_chars']) > 0:
+            selected_char = st.selectbox("Select a Character to analyze:", st.session_state['top_chars'])
+            
+            if st.button(f"Analyze Emotion for {selected_char}"):
+                with st.spinner(f"Tracing {selected_char} through the text..."):
+                    char_progress = []
+                    char_sentiment = []
+                    
+                    # Look for sentences mentioning the character
+                    first_name = selected_char.split()[0] # Use first name for broader matching
+                    for i, s in enumerate(sentences):
+                        if re.search(rf'\b{re.escape(first_name)}\b', s, re.IGNORECASE):
+                            score = sia.polarity_scores(s)['compound']
+                            char_sentiment.append(score)
+                            char_progress.append((i / len(sentences)) * 100)
+                    
+                    if len(char_sentiment) > 3:
+                        df_char = pd.DataFrame({'Story Progress (%)': char_progress, 'Sentiment': char_sentiment})
+                        
+                        # Apply a rolling average for a smoother trend line
+                        df_char['Smoothed Trend'] = df_char['Sentiment'].rolling(window=max(2, len(char_sentiment)//10), min_periods=1).mean()
+
+                        fig = px.scatter(df_char, x='Story Progress (%)', y='Sentiment', 
+                                         opacity=0.4, color_discrete_sequence=['#f72585'],
+                                         title=f"Emotional Journey of {selected_char}")
+                        fig.add_trace(go.Scatter(x=df_char['Story Progress (%)'], y=df_char['Smoothed Trend'],
+                                                 mode='lines', name='Trendline', line=dict(color='#7209b7', width=4)))
+                        
+                        fig.add_hline(y=0, line_dash="dash", line_color="black")
+                        fig.update_layout(template="plotly_white", yaxis_range=[-1.1, 1.1])
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.warning(f"Not enough data points found to graph an arc for {selected_char}.")
+        else:
+            st.info("💡 Please generate the 'Character Network' in Tab 1 first to identify the main characters.")
+
+    # ==========================================
+    # TAB 4: THEMATIC ANALYSIS
+    # ==========================================
+    with tab4:
+        st.header("Thematic Analysis (Lemmatization)")
+        st.markdown("Discover core themes by filtering out grammatical noise and plotting the most frequent Nouns, Verbs, and Adjectives.")
+        
+        if st.button("Analyze Themes", key="btn_themes"):
             with st.spinner("Lemmatizing and filtering vocabulary..."):
                 doc = nlp(analyzed_text[:1000000])
                 lemmas = Counter()
-                
-                # Semantic Filtering
                 allowed_pos = {"NOUN", "VERB", "ADJ"}
                 
                 for token in doc:
@@ -207,29 +256,25 @@ if uploaded_file is not None:
                     top_20 = lemmas.most_common(20)
                     df_themes = pd.DataFrame(top_20, columns=["Lemma", "Frequency"])
                     
-                    fig, ax = plt.subplots(figsize=(10, 5))
-                    ax.bar(df_themes["Lemma"], df_themes["Frequency"], color="#457b9d")
-                    plt.xticks(rotation=45, ha='right')
-                    ax.set_ylabel("Frequency")
-                    ax.set_title("Top 20 Semantic Keywords")
-                    ax.spines['top'].set_visible(False)
-                    ax.spines['right'].set_visible(False)
+                    # Plotly Bar Chart
+                    fig = px.bar(df_themes, x='Lemma', y='Frequency', title="Top 20 Semantic Keywords",
+                                 color='Frequency', color_continuous_scale='Teal', template="plotly_white")
+                    fig.update_layout(xaxis_title="Keyword (Lemma)", yaxis_title="Frequency Count", showlegend=False)
                     
-                    st.pyplot(fig)
-                    plt.close(fig)
+                    st.plotly_chart(fig, use_container_width=True)
                 else:
                     st.warning("Could not extract enough data for thematic analysis.")
 
     # ==========================================
-    # TAB 3: LINGUISTIC STYLE & REGISTER
+    # TAB 5: LINGUISTIC STYLE & REGISTER
     # ==========================================
-    with tab3:
+    with tab5:
         st.header("Linguistic Style & Register")
-        st.markdown("Analyze the author's syntactic choices and text complexity (**WD3_02.07.04** & **WD3_02.09.01**).")
+        st.markdown("Analyze the author's syntactic choices and text complexity.")
         
-        if st.button("Calculate Style Metrics"):
+        if st.button("Calculate Style Metrics", key="btn_style"):
             with st.spinner("Parsing syntax and calculating readability..."):
-                doc = nlp(analyzed_text[:500000]) # Cap for speed
+                doc = nlp(analyzed_text[:500000]) 
                 
                 total_sentences = 0
                 total_words = 0
@@ -244,14 +289,10 @@ if uploaded_file is not None:
                             total_words += 1
                             total_syllables += count_syllables(token.text)
                             
-                            if token.pos_ == "ADJ":
-                                adj_count += 1
-                            elif token.pos_ == "VERB":
-                                verb_count += 1
+                            if token.pos_ == "ADJ": adj_count += 1
+                            elif token.pos_ == "VERB": verb_count += 1
                 
-                # Metrics Calculation
                 if total_sentences > 0 and total_words > 0:
-                    # Descriptive Density
                     total_action_desc = adj_count + verb_count
                     if total_action_desc > 0:
                         adj_ratio = (adj_count / total_action_desc) * 100
@@ -259,82 +300,109 @@ if uploaded_file is not None:
                     else:
                         adj_ratio = verb_ratio = 0
                         
-                    # Flesch Reading Ease Formula
                     flesch_score = 206.835 - 1.015 * (total_words / total_sentences) - 84.6 * (total_syllables / total_words)
                     
-                    st.subheader("1. Descriptive Density (Adjectives vs. Verbs)")
                     col1, col2 = st.columns(2)
-                    col1.metric("Adjective Ratio (Descriptive)", f"{adj_ratio:.1f}%")
-                    col2.metric("Verb Ratio (Action-Oriented)", f"{verb_ratio:.1f}%")
                     
-                    st.progress(int(adj_ratio))
-                    st.caption("👈 More Adjectives (Poetic/Descriptive) | More Verbs (Action-driven) 👉")
-                    
-                    st.markdown("---")
-                    st.subheader("2. Text Complexity & Readability")
-                    st.markdown("Calculated using the **Flesch-Kincaid Reading Ease** formula:")
-                    st.latex(r"FRE = 206.835 - 1.015 \left( \frac{\text{Total Words}}{\text{Total Sentences}} \right) - 84.6 \left( \frac{\text{Total Syllables}}{\text{Total Words}} \right)")
-                    
-                    if flesch_score > 70: register = "Conversational / Accessible"
-                    elif flesch_score > 50: register = "Standard / Intermediate"
-                    elif flesch_score > 30: register = "Formal / Complex"
-                    else: register = "Academic / Highly Complex"
-                    
-                    col3, col4 = st.columns(2)
-                    col3.metric("Flesch Reading Ease Score", f"{flesch_score:.2f}")
-                    col4.metric("Assessed Register", register)
+                    # Gauge 1: Action vs Descriptive
+                    with col1:
+                        fig_style = go.Figure(go.Indicator(
+                            mode="gauge+number",
+                            value=verb_ratio,
+                            title={'text': "Style: Descriptive vs Action", 'font': {'size': 18}},
+                            number={'suffix': "% Verbs"},
+                            gauge={
+                                'axis': {'range': [0, 100]},
+                                'bar': {'color': "#3a0ca3"},
+                                'steps': [
+                                    {'range': [0, 45], 'color': "#4cc9f0"},   # Descriptive
+                                    {'range': [45, 55], 'color': "#e9ecef"},  # Balanced
+                                    {'range': [55, 100], 'color': "#f72585"}  # Action
+                                ]
+                            }
+                        ))
+                        st.plotly_chart(fig_style, use_container_width=True)
+                        st.caption("Blue = More Adjectives (Poetic) | Pink = More Verbs (Action-driven)")
+
+                    # Gauge 2: Readability
+                    with col2:
+                        if flesch_score > 70: register = "Conversational"
+                        elif flesch_score > 50: register = "Standard/Intermediate"
+                        elif flesch_score > 30: register = "Formal/Complex"
+                        else: register = "Academic/Difficult"
+                        
+                        fig_read = go.Figure(go.Indicator(
+                            mode="gauge+number",
+                            value=max(0, min(flesch_score, 100)), # Clamp between 0-100 for visual
+                            title={'text': f"Flesch-Kincaid Score<br><span style='font-size:0.8em;color:gray'>Register: {register}</span>", 'font': {'size': 18}},
+                            gauge={
+                                'axis': {'range': [0, 100]},
+                                'bar': {'color': "black"},
+                                'steps': [
+                                    {'range': [0, 30], 'color': "#d00000"},   # Difficult
+                                    {'range': [30, 60], 'color': "#ffba08"},  # Standard
+                                    {'range': [60, 100], 'color': "#3f88c5"}  # Easy
+                                ]
+                            }
+                        ))
+                        st.plotly_chart(fig_read, use_container_width=True)
+                        st.caption("Lower Score = More Complex/Academic | Higher Score = Easier to Read")
 
     # ==========================================
-    # TAB 4: AI REFLECTION & EVALUATION
+    # TAB 6: AI REFLECTION (SIDE-BY-SIDE)
     # ==========================================
-    with tab4:
-        st.header("Critical AI Evaluation & Research Log")
-        st.markdown("**WD3_02.07.03:** Evaluate the limitations of AI when dealing with figurative language, irony, or subtext.")
+    with tab6:
+        st.header("Critical AI Evaluation")
+        st.markdown("Evaluate the limitations of AI when dealing with figurative language, irony, or subtext.")
         
-        if st.button("Find Extreme Sentiment Fragments"):
+        if st.button("Find Extreme Sentiment Fragments", key="btn_ai"):
             with st.spinner("Scanning for extreme emotional polarity..."):
-                # Split text into rough sentences based on punctuation
-                raw_sentences = re.split(r'(?<=[.!?]) +', analyzed_text)
                 scored_sentences = []
-                
-                for s in raw_sentences:
+                for s in sentences:
                     clean_s = s.strip().replace('\n', ' ')
-                    if len(clean_s.split()) > 8: # Only consider full sentences
+                    if len(clean_s.split()) > 8: 
                         score = sia.polarity_scores(clean_s)['compound']
                         scored_sentences.append({'text': clean_s, 'score': score})
                 
-                # Sort by sentiment score
                 scored_sentences.sort(key=lambda x: x['score'])
                 
                 top_3_negative = scored_sentences[:3]
                 top_3_positive = scored_sentences[-3:]
                 top_3_positive.reverse()
                 
-                st.subheader("AI's Most Extreme Classifications")
+                st.markdown("### AI's Most Extreme Classifications")
                 
-                st.markdown("#### 🔴 Top 3 Most Negative Fragments")
-                for i, item in enumerate(top_3_negative):
-                    st.error(f"**Score: {item['score']:.2f}** | \"{item['text']}\"")
-                    
-                st.markdown("#### 🟢 Top 3 Most Positive Fragments")
-                for i, item in enumerate(top_3_positive):
-                    st.success(f"**Score: {item['score']:.2f}** | \"{item['text']}\"")
+                # Side-by-side Layout
+                col_neg, col_pos = st.columns(2)
+                
+                with col_neg:
+                    st.error("#### 🔴 Top 3 Negative Fragments")
+                    for item in top_3_negative:
+                        st.markdown(f"""
+                        <div style="background-color:#ffe5d9;padding:10px;border-radius:5px;margin-bottom:10px;">
+                            <strong>Score: {item['score']:.2f}</strong><br>
+                            <em>"{item['text']}"</em>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                with col_pos:
+                    st.success("#### 🟢 Top 3 Positive Fragments")
+                    for item in top_3_positive:
+                        st.markdown(f"""
+                        <div style="background-color:#d8f3dc;padding:10px;border-radius:5px;margin-bottom:10px;">
+                            <strong>Score: {item['score']:.2f}</strong><br>
+                            <em>"{item['text']}"</em>
+                        </div>
+                        """, unsafe_allow_html=True)
                     
                 st.markdown("---")
                 st.subheader("Student Reflection Task")
                 st.markdown("""
-                *Read the fragments above carefully.*
+                *Read the fragments above carefully. Log your thoughts in your research journal:*
                 1. **Irony & Sarcasm:** Did the AI label an ironic or sarcastic sentence as genuinely positive/negative?
                 2. **Figurative Language:** Did the AI misinterpret a metaphor (e.g., "killing it") literally?
                 3. **Contextual Nuance:** Is the emotion of the fragment different when placed in the broader context of the story?
                 """)
-                
-        st.markdown("---")
-        st.subheader("Research Cycle Log (WD3_01.01.01)")
-        student_notes = st.text_area("Record your observations, answers to the reflection tasks, and formulate your research conclusions here:", height=250)
-        
-        if st.button("Save Notes (Session Only)"):
-            st.success("Notes temporarily saved to session state. Be sure to copy them to your final research report!")
 
 else:
     st.info("Please upload a PDF document in the sidebar to begin your literary analysis.")
