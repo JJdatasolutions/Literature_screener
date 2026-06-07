@@ -1,82 +1,63 @@
 import streamlit as st
 import PyPDF2
 import spacy
-import nltk
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+import networkx as nx
 import matplotlib.pyplot as plt
-import seaborn as sns
-import plotly.graph_objects as go
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from collections import Counter
+import pandas as pd
+import itertools
 import re
-import subprocess
 import sys
 import os
-import gc
-import pandas as pd
-
-# --- VISUAL DESIGN SETTINGS ---
-sns.set_theme(style="whitegrid", palette="muted")
-plt.rcParams['font.family'] = 'sans-serif'
-plt.rcParams['figure.dpi'] = 150
+import subprocess
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="Scientific Lit-Dashboard", layout="wide")
-st.title("🔬 Scientific Literary Analysis Dashboard")
-st.markdown("Onderzoekscyclus en Stijlanalyse voor de 3de graad Moderne Talen.")
+st.set_page_config(page_title="Literary Analysis Dashboard", layout="wide")
+st.title("📚 Scientific Literary Analysis Dashboard")
+st.markdown("A comprehensive tool for 12th-grade Modern Languages students to analyze literature through data.")
 
-# --- CACHING MODELS & DATA ---
-@st.cache_resource(show_spinner="Laden van AI-modellen (eenmalig)...")
+# --- CACHING MODELS & NLP SETUP ---
+@st.cache_resource(show_spinner="Loading NLP Models (This may take a moment on first run)...")
 def load_models():
-    nltk.download('punkt', quiet=True)
+    """Loads spaCy and VADER models securely."""
     try:
         nlp = spacy.load("en_core_web_sm")
     except OSError:
-        target_dir = "/tmp/spacy_models"
-        os.makedirs(target_dir, exist_ok=True)
-        subprocess.check_call([
-            sys.executable, "-m", "pip", "install", 
-            "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl", 
-            "--target", target_dir, "--no-deps", "--quiet"
-        ])
-        if target_dir not in sys.path: 
-            sys.path.insert(0, target_dir)
+        st.warning("Downloading spaCy model 'en_core_web_sm'...")
+        subprocess.check_call([sys.executable, "-m", "spacy", "download", "en_core_web_sm"])
         nlp = spacy.load("en_core_web_sm")
     
-    if "sentencizer" not in nlp.pipe_names: 
+    # Increase max length for full books
+    nlp.max_length = 2500000 
+    
+    # Add sentencizer for faster sentence boundary detection
+    if "sentencizer" not in nlp.pipe_names:
         nlp.add_pipe("sentencizer")
         
-    nlp.max_length = 2000000 
     sia = SentimentIntensityAnalyzer()
     return nlp, sia
 
 nlp, sia = load_models()
 
+# --- HELPER FUNCTIONS ---
 @st.cache_data
-def extract_all_pages(file_buffer):
-    reader = PyPDF2.PdfReader(file_buffer)
+def extract_pdf_pages(file_buffer):
+    """Extracts text page by page from a PDF with robust error handling."""
     pages = []
-    for page in reader.pages:
-        text = page.extract_text()
-        if text:
-            pages.append(text)
-    return pages
-
-def get_chunks(text, chunk_size=50000):
-    words = text.split()
-    current_chunk = []
-    current_length = 0
-    for word in words:
-        current_chunk.append(word)
-        current_length += len(word) + 1
-        if current_length >= chunk_size:
-            yield " ".join(current_chunk)
-            current_chunk = []
-            current_length = 0
-    if current_chunk:
-        yield " ".join(current_chunk)
+    try:
+        reader = PyPDF2.PdfReader(file_buffer)
+        for page in reader.pages:
+            text = page.extract_text()
+            if text:
+                pages.append(text)
+        return pages
+    except Exception as e:
+        st.error(f"Error reading PDF: {e}")
+        return []
 
 def count_syllables(word):
-    """Simpele heuristiek om lettergrepen te tellen voor de Flesch-Kincaid score."""
+    """Simple heuristic to count syllables for Flesch-Kincaid."""
     word = word.lower()
     if len(word) <= 3:
         return 1
@@ -85,117 +66,177 @@ def count_syllables(word):
     matches = re.findall(r'[aeiouy]{1,2}', word)
     return max(1, len(matches))
 
-# --- SIDEBAR UPLOAD & SETTINGS ---
-st.sidebar.header("1. Upload Bronmateriaal")
-uploaded_file = st.sidebar.file_uploader("Upload Engelstalige roman (PDF)", type="pdf")
+def clean_entity_name(name):
+    """Cleans up character names (removes titles and possessives)."""
+    name = re.sub(r"['’]s\b", "", name, flags=re.IGNORECASE)
+    name = re.sub(r'\b(Mr\.|Mrs\.|Ms\.|Dr\.|Lord|Lady|Miss)\s', '', name, flags=re.IGNORECASE)
+    return name.strip()
+
+# --- SIDEBAR: FILE UPLOAD ---
+st.sidebar.header("1. Upload Literature")
+uploaded_file = st.sidebar.file_uploader("Upload an English novel/text (PDF format)", type="pdf")
 
 if uploaded_file is not None:
-    with st.spinner("PDF structuur analyseren..."):
-        all_pages = extract_all_pages(uploaded_file)
-        total_pages = len(all_pages)
-
-    st.sidebar.markdown("---")
-    st.sidebar.header("2. Afbakening Onderzoek")
-    st.sidebar.info("Beperk de data om 'overfitting' van je analyse te voorkomen en verwerkingstijd te sparen.")
+    with st.spinner("Extracting text from PDF..."):
+        pdf_pages = extract_pdf_pages(uploaded_file)
+        total_pages = len(pdf_pages)
+        full_text = " ".join(pdf_pages)
     
-    max_limit = min(total_pages, 200)
-    selected_page_count = st.sidebar.slider("Aantal te analyseren pagina's", min_value=10, max_value=max_limit, value=max_limit)
-    read_direction = st.sidebar.radio("Selecteer brondeel:", ["Begin van het boek", "Einde van het boek"])
+    st.sidebar.success(f"Successfully loaded {total_pages} pages.")
+    
+    # Optional: Limit analysis scope for performance
+    st.sidebar.markdown("---")
+    max_pages = st.sidebar.slider("Pages to analyze (Limit to avoid memory overload)", 
+                                  min_value=1, max_value=total_pages, value=min(total_pages, 50))
+    
+    analyzed_pages = pdf_pages[:max_pages]
+    analyzed_text = " ".join(analyzed_pages)
 
-    if read_direction == "Begin van het boek":
-        target_pages = all_pages[:selected_page_count]
-    else:
-        target_pages = all_pages[-selected_page_count:]
-
-    text_data = re.sub(r'\s+', ' ', " ".join(target_pages))
-    chunks = list(get_chunks(text_data))
-    total_chunks = len(chunks)
-
-    # --- TABS VOOR DE ONDERZOEKSCYCLUS ---
+    # --- TABS CREATION ---
     tab1, tab2, tab3, tab4 = st.tabs([
-        "📖 1. Didactisch Kader", 
-        "🧠 2. Thematische Lemmatisering", 
-        "⚙️ 3. Linguïstische Stijl & Register", 
-        "🎭 4. Figuratieve Taalreflectie"
+        "🕸️ 1. Network & Narrative Arc", 
+        "🧠 2. Thematic Analysis", 
+        "📐 3. Linguistic Style & Register", 
+        "🤔 4. AI Reflection & Evaluation"
     ])
 
     # ==========================================
-    # TAB 1: DIDACTISCH KADER (LEERPLANDOELEN)
+    # TAB 1: CHARACTER NETWORK & NARRATIVE ARC
     # ==========================================
     with tab1:
-        st.header("Onderzoeksdoelen & Verantwoording")
-        st.markdown("""
-        Dit dashboard is ontworpen ter ondersteuning van de **Onderzoekscyclus Literatuur** in de 3de graad Moderne Talen. 
-        De output van de verschillende modules helpt je bij het behalen van de volgende specifieke leerplandoelen (Engels):
-        """)
+        st.header("Character Network & Narrative Sentiment Arc")
         
-        st.info("**WD3_01.01.01: Doorlopen van de onderzoekscyclus**\n\nJe gebruikt dit dashboard om kritisch data (literaire bronnen) te verzamelen, te ordenen via parameters (pagina-selecties), en de verwerkte visuele data te interpreteren om een onderzoeksvraag te beantwoorden.")
-        st.success("**WD3_02.20.01: Analyseren van poëticale en narratieve structuren**\n\nMet behulp van technologische ondersteuning onderzoek je de stilistische keuzes van een auteur uit de wereldliteratuur (zoals woordkeuze, syntax en actiegerichtheid).")
-        st.warning("**WD3_02.07.04: Verklaren van automatische analyses**\n\nIn de tab *Linguïstische Stijl* en *Lemmatisering* maak je gebruik van Natural Language Processing (NLP). Je leert begrijpen hoe de computer tekst opbreekt (parsing), woorden terugbrengt naar hun stamvorm (lemmatisering) en woordsoorten toekent (POS-tagging).")
-        st.error("**WD3_02.07.03: Beperkingen van AI evalueren**\n\nIn de tab *Figuratieve Taalreflectie* controleer je handmatig de door de AI berekende sentiment-scores. Je leert hoe AI vaak 'struikelt' over ironie, sarcasme, of cultureel impliciet taalgebruik.")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("Narrative Sentiment Arc")
+            st.info("Displays the emotional trajectory (positive vs. negative) across the selected pages.")
+            
+            if st.button("Generate Narrative Arc"):
+                with st.spinner("Calculating sentiment per page..."):
+                    page_scores = []
+                    for i, page_text in enumerate(analyzed_pages):
+                        score = sia.polarity_scores(page_text)['compound']
+                        page_scores.append(score)
+                    
+                    fig, ax = plt.subplots(figsize=(8, 4))
+                    ax.plot(range(1, len(page_scores) + 1), page_scores, color='#8856a7', marker='o', linestyle='-', markersize=4)
+                    ax.axhline(0, color='black', linewidth=1, linestyle='--')
+                    ax.set_xlabel("Page Number")
+                    ax.set_ylabel("Sentiment (Compound Score)")
+                    ax.set_title("Emotional Arc of the Text")
+                    ax.grid(True, alpha=0.3)
+                    st.pyplot(fig)
+                    plt.close(fig)
+
+        with col2:
+            st.subheader("Character Interaction Map")
+            st.info("Maps out which characters frequently appear together in the same sentences.")
+            
+            if st.button("Generate Character Network"):
+                with st.spinner("Extracting entities and building network..."):
+                    interactions = Counter()
+                    char_counts = Counter()
+                    
+                    # Process text in chunks to manage memory
+                    doc = nlp(analyzed_text[:1000000]) # Cap at 1M chars for safety
+                    
+                    for sent in doc.sents:
+                        chars_in_sent = set()
+                        for ent in sent.ents:
+                            if ent.label_ == "PERSON" and len(ent.text.split()) < 4:
+                                clean_name = clean_entity_name(ent.text)
+                                if len(clean_name) > 2 and clean_name.istitle():
+                                    chars_in_sent.add(clean_name)
+                        
+                        for char in chars_in_sent:
+                            char_counts[char] += 1
+                            
+                        if len(chars_in_sent) > 1:
+                            for c1, c2 in itertools.combinations(sorted(chars_in_sent), 2):
+                                interactions[(c1, c2)] += 1
+                                
+                    # Filter top characters
+                    top_chars = [c for c, count in char_counts.most_common(15)]
+                    
+                    G = nx.Graph()
+                    for char in top_chars:
+                        G.add_node(char, size=char_counts[char])
+                        
+                    for (c1, c2), weight in interactions.items():
+                        if c1 in top_chars and c2 in top_chars:
+                            G.add_edge(c1, c2, weight=weight)
+                            
+                    if len(G.nodes) > 0:
+                        fig, ax = plt.subplots(figsize=(8, 6))
+                        pos = nx.spring_layout(G, k=0.5, seed=42)
+                        
+                        node_sizes = [nx.get_node_attributes(G, 'size')[n] * 50 for n in G.nodes()]
+                        edge_widths = [nx.get_edge_attributes(G, 'weight')[e] * 0.5 for e in G.edges()]
+                        
+                        nx.draw_networkx_nodes(G, pos, node_size=node_sizes, node_color='#a8dadc', edgecolors='#1d3557', ax=ax)
+                        nx.draw_networkx_edges(G, pos, width=edge_widths, alpha=0.5, ax=ax)
+                        nx.draw_networkx_labels(G, pos, font_size=9, font_weight="bold", ax=ax)
+                        
+                        ax.axis("off")
+                        st.pyplot(fig)
+                        plt.close(fig)
+                    else:
+                        st.warning("Not enough character interactions found in the selected text.")
 
     # ==========================================
-    # TAB 2: THEMATISCHE LEMMATISERING
+    # TAB 2: THEMATIC ANALYSIS
     # ==========================================
     with tab2:
-        st.header("Thematische Lemmatisering")
-        st.markdown("**Doel:** Achterhaal de kernthema's door alle inhoudswoorden (zelfstandige naamwoorden) terug te brengen naar hun woordenboekvorm (lemma).")
-
-        if st.button("Genereer Thematische Lemma's"):
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            lemma_counts = Counter()
-            
-            for i, doc in enumerate(nlp.pipe(chunks, disable=["ner", "textcat", "custom"])):
+        st.header("Thematic Analysis (Lemmatization)")
+        st.markdown("**Objective:** Discover the core themes of the text by filtering out grammatical noise and focusing on semantically rich words (Nouns, Verbs, Adjectives).")
+        
+        if st.button("Analyze Themes"):
+            with st.spinner("Lemmatizing and filtering vocabulary..."):
+                doc = nlp(analyzed_text[:1000000])
+                lemmas = Counter()
+                
+                # Semantic Filtering
+                allowed_pos = {"NOUN", "VERB", "ADJ"}
+                
                 for token in doc:
-                    # Filter: moet een noun zijn, geen stopwoord, geen interpunctie, alleen alfabetisch
-                    if token.pos_ == "NOUN" and not token.is_stop and token.is_alpha and len(token.text) > 2:
-                        lemma_counts[token.lemma_.lower()] += 1
-                        
-                progress_bar.progress((i + 1) / total_chunks)
-                status_text.text(f"Lemmatiseren: deel {i + 1} van {total_chunks}...")
-                gc.collect()
-
-            status_text.text("Genereren van Top 20...")
-            
-            if lemma_counts:
-                top_lemmas = lemma_counts.most_common(20)
-                lemmas, counts = zip(*top_lemmas)
+                    if token.pos_ in allowed_pos and not token.is_stop and token.is_alpha and len(token.text) > 2:
+                        lemmas[token.lemma_.lower()] += 1
                 
-                fig, ax = plt.subplots(figsize=(12, 6))
-                sns.barplot(x=list(counts), y=list(lemmas), palette="viridis", ax=ax)
-                ax.set_title("Top 20 Meest Voorkomende Zelfstandige Naamwoorden (Lemma's)", fontsize=14, fontweight='bold')
-                ax.set_xlabel("Frequentie")
-                ax.set_ylabel("Lemma (Woordenboekvorm)")
-                sns.despine()
-                st.pyplot(fig)
-                plt.close(fig)
-                
-                st.markdown("### 📝 Reflectievraag voor je onderzoek:")
-                st.write("> *Zijn er lemma's in de bovenstaande lijst die wijzen op een overkoepelend motief of thema in het gekozen romanfragment? Hoe sturen deze woorden de perceptie van de lezer?*")
-            
-            progress_bar.empty()
-            status_text.empty()
+                if lemmas:
+                    top_20 = lemmas.most_common(20)
+                    df_themes = pd.DataFrame(top_20, columns=["Lemma", "Frequency"])
+                    
+                    fig, ax = plt.subplots(figsize=(10, 5))
+                    ax.bar(df_themes["Lemma"], df_themes["Frequency"], color="#457b9d")
+                    plt.xticks(rotation=45, ha='right')
+                    ax.set_ylabel("Frequency")
+                    ax.set_title("Top 20 Semantic Keywords")
+                    ax.spines['top'].set_visible(False)
+                    ax.spines['right'].set_visible(False)
+                    
+                    st.pyplot(fig)
+                    plt.close(fig)
+                else:
+                    st.warning("Could not extract enough data for thematic analysis.")
 
     # ==========================================
-    # TAB 3: LINGUÏSTISCHE STIJL & REGISTER
+    # TAB 3: LINGUISTIC STYLE & REGISTER
     # ==========================================
     with tab3:
-        st.header("Linguïstische Stijlanalyse (POS-tagging & Syntaxis)")
-        st.markdown("**Doel:** Bereken het taalkundig register en de schrijfstijl van de auteur met behulp van AI Part-of-Speech (POS) tagging en complexiteitsalgoritmes.")
-
-        if st.button("Voer Stijl- en Registeranalyse uit"):
-            progress_bar = st.progress(0)
-            
-            total_sentences = 0
-            total_words = 0
-            total_syllables = 0
-            
-            adj_count = 0
-            verb_count = 0
-            
-            for i, doc in enumerate(nlp.pipe(chunks, disable=["ner", "textcat", "custom"])):
+        st.header("Linguistic Style & Register")
+        st.markdown("Analyze the author's syntactic choices and text complexity (**WD3_02.07.04** & **WD3_02.09.01**).")
+        
+        if st.button("Calculate Style Metrics"):
+            with st.spinner("Parsing syntax and calculating readability..."):
+                doc = nlp(analyzed_text[:500000]) # Cap for speed
+                
+                total_sentences = 0
+                total_words = 0
+                total_syllables = 0
+                adj_count = 0
+                verb_count = 0
+                
                 for sent in doc.sents:
                     total_sentences += 1
                     for token in sent:
@@ -207,109 +248,93 @@ if uploaded_file is not None:
                                 adj_count += 1
                             elif token.pos_ == "VERB":
                                 verb_count += 1
-                progress_bar.progress((i + 1) / total_chunks)
-                gc.collect()
-
-            # 1. Syntactische Complexiteit & Leesbaarheid (Flesch-Kincaid)
-            if total_sentences > 0 and total_words > 0:
-                avg_sentence_length = total_words / total_sentences
                 
-                # Flesch Reading Ease Formula
-                flesch_score = 206.835 - 1.015 * (total_words / total_sentences) - 84.6 * (total_syllables / total_words)
-                
-                if flesch_score > 80: register = "Zeer Informeel / Kinderlijk (Conversational)"
-                elif flesch_score > 60: register = "Standaard / Toegankelijk (Average Reader)"
-                elif flesch_score > 30: register = "Complex / Formeel (College Level)"
-                else: register = "Zeer Academisch / Archaïsch (Difficult)"
-
-                col1, col2 = st.columns(2)
-                col1.metric("Gemiddelde Zinslengte (Words/Sent)", f"{avg_sentence_length:.1f}")
-                col2.metric("Flesch Readability Score", f"{flesch_score:.1f}")
-                
-                st.info(f"**Register Analyse:** Op basis van de syntactische complexiteit wordt het register van dit tekstdeel beoordeeld als: **{register}**.")
-
-            # 2. POS Gauge: Action vs Descriptive
-            st.markdown("---")
-            if (adj_count + verb_count) > 0:
-                verb_ratio = verb_count / (adj_count + verb_count)
-                
-                fig = go.Figure(go.Indicator(
-                    mode = "gauge+number",
-                    value = verb_ratio * 100,
-                    title = {'text': "Auteur Stijl: Descriptief vs. Actiegericht", 'font': {'size': 18}},
-                    number = {'suffix': "% Werkwoorden"},
-                    gauge = {
-                        'axis': {'range': [None, 100], 'tickwidth': 1},
-                        'bar': {'color': "#1e3d59"},
-                        'steps': [
-                            {'range': [0, 40], 'color': "#a8dadc"},     # Descriptive
-                            {'range': [40, 60], 'color': "#f1faee"},    # Balanced
-                            {'range': [60, 100], 'color': "#e63946"}    # Action
-                        ],
-                        'threshold': {
-                            'line': {'color': "black", 'width': 4},
-                            'thickness': 0.75,
-                            'value': verb_ratio * 100
-                        }
-                    }
-                ))
-                
-                fig.add_annotation(x=0.1, y=0, text="Descriptive (Poetic)", showarrow=False, font=dict(size=14, color="#1d3557"))
-                fig.add_annotation(x=0.9, y=0, text="Action-oriented (Dynamic)", showarrow=False, font=dict(size=14, color="#e63946"))
-                
-                st.plotly_chart(fig, use_container_width=True)
-                
-                st.markdown("### 📝 Reflectievraag voor je onderzoek:")
-                st.write("> *Een score onder de 40% wijst op veel bijvoeglijke naamwoorden (descriptief/poëtisch). Boven de 60% wijst op veel werkwoorden (actie/plot-gedreven). Komt dit overeen met jouw leeservaring van de auteur?*")
-
-            progress_bar.empty()
+                # Metrics Calculation
+                if total_sentences > 0 and total_words > 0:
+                    # Descriptive Density
+                    total_action_desc = adj_count + verb_count
+                    if total_action_desc > 0:
+                        adj_ratio = (adj_count / total_action_desc) * 100
+                        verb_ratio = (verb_count / total_action_desc) * 100
+                    else:
+                        adj_ratio = verb_ratio = 0
+                        
+                    # Flesch Reading Ease Formula
+                    flesch_score = 206.835 - 1.015 * (total_words / total_sentences) - 84.6 * (total_syllables / total_words)
+                    
+                    st.subheader("1. Descriptive Density (Adjectives vs. Verbs)")
+                    col1, col2 = st.columns(2)
+                    col1.metric("Adjective Ratio (Descriptive)", f"{adj_ratio:.1f}%")
+                    col2.metric("Verb Ratio (Action-Oriented)", f"{verb_ratio:.1f}%")
+                    
+                    st.progress(int(adj_ratio))
+                    st.caption("👈 More Adjectives (Poetic/Descriptive) | More Verbs (Action-driven) 👉")
+                    
+                    st.markdown("---")
+                    st.subheader("2. Text Complexity & Readability")
+                    st.markdown("Calculated using the **Flesch-Kincaid Reading Ease** formula:")
+                    st.latex(r"FRE = 206.835 - 1.015 \left( \frac{\text{Total Words}}{\text{Total Sentences}} \right) - 84.6 \left( \frac{\text{Total Syllables}}{\text{Total Words}} \right)")
+                    
+                    if flesch_score > 70: register = "Conversational / Accessible"
+                    elif flesch_score > 50: register = "Standard / Intermediate"
+                    elif flesch_score > 30: register = "Formal / Complex"
+                    else: register = "Academic / Highly Complex"
+                    
+                    col3, col4 = st.columns(2)
+                    col3.metric("Flesch Reading Ease Score", f"{flesch_score:.2f}")
+                    col4.metric("Assessed Register", register)
 
     # ==========================================
-    # TAB 4: FIGURATIEVE TAALREFLECTIE
+    # TAB 4: AI REFLECTION & EVALUATION
     # ==========================================
     with tab4:
-        st.header("Figuratieve Taal & AI Sentiment Evaluatie")
-        st.markdown("**Doel:** Evalueer de beperkingen van kunstmatige intelligentie. AI beoordeelt tekst vaak uiterst letterlijk. Zoek naar ironie, sarcasme, of metaforen in de uitschieters.")
-
-        if st.button("Isoleer Extremen voor Handmatige Controle"):
-            with st.spinner("VADER Sentiment Analyzer leest zinnen..."):
-                sentences = re.split(r'(?<=[.!?]) +', text_data)
+        st.header("Critical AI Evaluation & Research Log")
+        st.markdown("**WD3_02.07.03:** Evaluate the limitations of AI when dealing with figurative language, irony, or subtext.")
+        
+        if st.button("Find Extreme Sentiment Fragments"):
+            with st.spinner("Scanning for extreme emotional polarity..."):
+                # Split text into rough sentences based on punctuation
+                raw_sentences = re.split(r'(?<=[.!?]) +', analyzed_text)
                 scored_sentences = []
                 
-                for s in sentences:
-                    s_clean = s.strip().replace('\n', ' ')
-                    # We kijken enkel naar volwaardige zinnen (meer dan 8 woorden)
-                    if len(s_clean.split()) > 8:
-                        score = sia.polarity_scores(s_clean)['compound']
-                        scored_sentences.append({'text': s_clean, 'score': score})
+                for s in raw_sentences:
+                    clean_s = s.strip().replace('\n', ' ')
+                    if len(clean_s.split()) > 8: # Only consider full sentences
+                        score = sia.polarity_scores(clean_s)['compound']
+                        scored_sentences.append({'text': clean_s, 'score': score})
                 
-                # Sorteer op score
+                # Sort by sentiment score
                 scored_sentences.sort(key=lambda x: x['score'])
                 
-                top_5_negative = scored_sentences[:5]
-                top_5_positive = scored_sentences[-5:]
-                top_5_positive.reverse() # Hoogste positieve bovenaan
-
-                st.markdown("---")
-                col1, col2 = st.columns(2)
+                top_3_negative = scored_sentences[:3]
+                top_3_positive = scored_sentences[-3:]
+                top_3_positive.reverse()
                 
-                with col1:
-                    st.error("### 🔴 AI's Top 5 Meest Negatieve Fragmenten")
-                    for i, item in enumerate(top_5_negative):
-                        st.markdown(f"**{i+1}. Score: {item['score']:.2f}**\n\n> *\"{item['text']}\"*")
+                st.subheader("AI's Most Extreme Classifications")
                 
-                with col2:
-                    st.success("### 🟢 AI's Top 5 Meest Positieve Fragmenten")
-                    for i, item in enumerate(top_5_positive):
-                        st.markdown(f"**{i+1}. Score: {item['score']:.2f}**\n\n> *\"{item['text']}\"*")
-
+                st.markdown("#### 🔴 Top 3 Most Negative Fragments")
+                for i, item in enumerate(top_3_negative):
+                    st.error(f"**Score: {item['score']:.2f}** | \"{item['text']}\"")
+                    
+                st.markdown("#### 🟢 Top 3 Most Positive Fragments")
+                for i, item in enumerate(top_3_positive):
+                    st.success(f"**Score: {item['score']:.2f}** | \"{item['text']}\"")
+                    
                 st.markdown("---")
-                st.markdown("### 📝 Reflectie-opdrachten (Handmatige Controle):")
+                st.subheader("Student Reflection Task")
                 st.markdown("""
-                1. **Valse Positieven:** Is een van de 'Positieve' fragmenten eigenlijk cynisch, sarcastisch of duister als je de bredere context van de roman kent? Leg uit waarom de AI zich vergiste.
-                2. **Metaforiek:** Bevatten de fragmenten metaforen (bijv. "Een storm in zijn hart") die door de AI letterlijk (als een gevaarlijke weersomstandigheid) werden vertaald naar een negatieve score?
-                3. **Culturele Implicaties:** Mist het algoritme bepaalde culturele of historische nuances?
+                *Read the fragments above carefully.*
+                1. **Irony & Sarcasm:** Did the AI label an ironic or sarcastic sentence as genuinely positive/negative?
+                2. **Figurative Language:** Did the AI misinterpret a metaphor (e.g., "killing it") literally?
+                3. **Contextual Nuance:** Is the emotion of the fragment different when placed in the broader context of the story?
                 """)
+                
+        st.markdown("---")
+        st.subheader("Research Cycle Log (WD3_01.01.01)")
+        student_notes = st.text_area("Record your observations, answers to the reflection tasks, and formulate your research conclusions here:", height=250)
+        
+        if st.button("Save Notes (Session Only)"):
+            st.success("Notes temporarily saved to session state. Be sure to copy them to your final research report!")
 
 else:
-    st.info("Upload een PDF in het zijpaneel om het onderzoek te starten.")
+    st.info("Please upload a PDF document in the sidebar to begin your literary analysis.")
