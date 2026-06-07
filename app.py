@@ -2,7 +2,6 @@ import streamlit as st
 import PyPDF2
 import spacy
 import networkx as nx
-import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 import plotly.express as px
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
@@ -74,8 +73,14 @@ def clean_entity_name(name):
 def get_sentences(text):
     return re.split(r'(?<=[.!?]) +', text)
 
+def truncate_text(text, max_words=100):
+    """Beperkt fragmenten tot een maximaal aantal woorden."""
+    words = text.split()
+    if len(words) > max_words:
+        return " ".join(words[:max_words]) + " [...]"
+    return text
+
 # --- SESSION STATE INITIALIZATION ---
-# Prevents components from disappearing when interacting with widgets
 for key in ['net_done', 'arc_done', 'themes_done', 'style_done', 'ai_done']:
     if key not in st.session_state:
         st.session_state[key] = False
@@ -115,7 +120,7 @@ if uploaded_file is not None:
     analyzed_text = " ".join(analyzed_pages)
     sentences = get_sentences(analyzed_text)
 
-    # Reset session state if text length changes (meaning the user adjusted the slider)
+    # Reset session state if text length changes
     if 'prev_text_len' not in st.session_state or st.session_state['prev_text_len'] != len(analyzed_text):
         st.session_state['prev_text_len'] = len(analyzed_text)
         for key in ['net_done', 'arc_done', 'themes_done', 'style_done', 'ai_done']:
@@ -132,31 +137,53 @@ if uploaded_file is not None:
     ])
 
     # ==========================================
-    # TAB 1: CHARACTER NETWORK
+    # TAB 1: CHARACTER NETWORK (Refactored)
     # ==========================================
     with tab1:
         st.header("Social Interaction Network")
-        st.markdown("Maps out which characters frequently appear together. Node size and color reflect how central the character is.")
+        st.markdown("Maps out which characters frequently interact. Node size reflects centrality. Uses a sliding window of 3 sentences to detect broader conversational contexts.")
         
         if st.button("Generate Character Network") or st.session_state['net_done']:
             st.session_state['net_done'] = True
-            with st.spinner("Extracting entities and calculating centrality..."):
+            with st.spinner("Extracting entities, resolving names, and computing Plotly network..."):
                 @st.cache_data
                 def build_network_data(text):
-                    interactions = Counter()
-                    char_counts = Counter()
                     doc = nlp(text[:1000000])
-                    for sent in doc.sents:
-                        chars_in_sent = set()
-                        for ent in sent.ents:
-                            if ent.label_ == "PERSON" and len(ent.text.split()) < 4:
-                                clean_name = clean_entity_name(ent.text)
-                                if len(clean_name) > 2 and clean_name.istitle():
-                                    chars_in_sent.add(clean_name)
-                        for char in chars_in_sent: char_counts[char] += 1
-                        if len(chars_in_sent) > 1:
-                            for c1, c2 in itertools.combinations(sorted(chars_in_sent), 2):
+                    sents = list(doc.sents)
+                    
+                    # 1. Extract raw entities
+                    raw_entities = []
+                    for sent in sents:
+                        sent_ents = [clean_entity_name(ent.text) for ent in sent.ents if ent.label_ == "PERSON" and len(ent.text.split()) < 4]
+                        raw_entities.append([e for e in sent_ents if len(e) > 2 and e.istitle()])
+                        
+                    # 2. Name deduplication (Alias Mapping)
+                    unique_names = set(e for sublist in raw_entities for e in sublist)
+                    alias_map = {name: name for name in unique_names}
+                    for name in unique_names:
+                        if len(name.split()) == 1:
+                            for long_name in unique_names:
+                                if name in long_name.split() and len(long_name.split()) > 1:
+                                    alias_map[name] = long_name
+                                    break
+                                    
+                    char_counts = Counter()
+                    interactions = Counter()
+                    
+                    # 3. Sliding window of 3 sentences
+                    for i in range(len(raw_entities)):
+                        window_chars = set()
+                        for j in range(i, min(i + 3, len(raw_entities))):
+                            for char in raw_entities[j]:
+                                resolved_char = alias_map[char]
+                                window_chars.add(resolved_char)
+                                if i == j: # Count isolated frequency only once per primary sentence
+                                    char_counts[resolved_char] += 1
+                                    
+                        if len(window_chars) > 1:
+                            for c1, c2 in itertools.combinations(sorted(window_chars), 2):
                                 interactions[(c1, c2)] += 1
+                                
                     return char_counts, interactions
                 
                 char_counts, interactions = build_network_data(analyzed_text)
@@ -164,55 +191,126 @@ if uploaded_file is not None:
                 st.session_state['top_chars'] = top_chars 
                 
                 G = nx.Graph()
-                for char in top_chars: G.add_node(char, size=char_counts[char])
+                for char in top_chars: G.add_node(char)
                 for (c1, c2), weight in interactions.items():
                     if c1 in top_chars and c2 in top_chars: G.add_edge(c1, c2, weight=weight)
                         
                 if len(G.nodes) > 0:
-                    fig, ax = plt.subplots(figsize=(12, 8), facecolor='#ffffff')
-                    pos = nx.spring_layout(G, k=0.8, iterations=50, seed=42)
-                    degrees = dict(G.degree(weight='weight'))
-                    node_sizes = [v * 50 for v in degrees.values()]
-                    node_colors = list(degrees.values())
-                    edge_widths = [nx.get_edge_attributes(G, 'weight')[e] * 0.5 for e in G.edges()]
+                    pos = nx.spring_layout(G, k=0.6, iterations=50, seed=42)
                     
-                    nx.draw_networkx_nodes(G, pos, node_size=node_sizes, node_color=node_colors, 
-                                           cmap=plt.cm.coolwarm, edgecolors='white', linewidths=1.5, ax=ax)
-                    nx.draw_networkx_edges(G, pos, width=edge_widths, edge_color='gray', alpha=0.3, ax=ax)
-                    nx.draw_networkx_labels(G, pos, font_size=10, font_weight="bold", ax=ax,
-                                            bbox=dict(facecolor='white', edgecolor='none', alpha=0.6, pad=0.3))
-                    ax.axis("off")
-                    st.pyplot(fig)
-                    plt.close(fig)
+                    # Plotly Edges
+                    edge_x = []
+                    edge_y = []
+                    for edge in G.edges():
+                        x0, y0 = pos[edge[0]]
+                        x1, y1 = pos[edge[1]]
+                        edge_x.extend([x0, x1, None])
+                        edge_y.extend([y0, y1, None])
+                        
+                    edge_trace = go.Scatter(
+                        x=edge_x, y=edge_y,
+                        line=dict(width=0.8, color='#A9A9A9'),
+                        hoverinfo='none',
+                        mode='lines')
+                        
+                    # Plotly Nodes
+                    node_x = []
+                    node_y = []
+                    node_text = []
+                    node_size = []
+                    node_color = []
+                    
+                    degrees = [G.degree(n, weight='weight') for n in G.nodes()]
+                    max_deg = max(degrees) if degrees else 1
+                    
+                    for node in G.nodes():
+                        x, y = pos[node]
+                        node_x.append(x)
+                        node_y.append(y)
+                        node_text.append(node)
+                        deg = G.degree(node, weight='weight')
+                        node_size.append(max(15, (deg / max_deg) * 60))
+                        node_color.append(deg)
+                        
+                    node_trace = go.Scatter(
+                        x=node_x, y=node_y,
+                        mode='markers+text',
+                        text=node_text,
+                        textposition="top center",
+                        hovertext=[f"Interactions: {c}" for c in node_color],
+                        hoverinfo="text",
+                        marker=dict(
+                            showscale=True,
+                            colorscale='Viridis',
+                            size=node_size,
+                            color=node_color,
+                            line=dict(width=2, color='white')
+                        ))
+                        
+                    fig = go.Figure(data=[edge_trace, node_trace],
+                                    layout=go.Layout(
+                                        title='Interactive Character Network',
+                                        showlegend=False,
+                                        hovermode='closest',
+                                        margin=dict(b=20,l=5,r=5,t=40),
+                                        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                                        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                                        plot_bgcolor='white'
+                                    ))
+                    st.plotly_chart(fig, use_container_width=True)
                 else:
                     st.warning("Not enough character interactions found.")
 
     # ==========================================
-    # TAB 2: NARRATIVE ARC
+    # TAB 2: NARRATIVE ARC (Refactored)
     # ==========================================
     with tab2:
         st.header("Global Narrative Sentiment Arc")
-        st.markdown("Displays the emotional trajectory across the selected pages.")
+        st.markdown("Displays the emotional trajectory over **100 chronological segments**, utilizing a smoothing algorithm to reveal the macro-emotional structure.")
         
         if st.button("Generate Narrative Arc") or st.session_state['arc_done']:
             st.session_state['arc_done'] = True
-            with st.spinner("Calculating sentiment per page..."):
+            with st.spinner("Calculating timeline sentiment and applying smoothing..."):
                 @st.cache_data
-                def calculate_arc(pages):
-                    return [sia.polarity_scores(p)['compound'] for p in pages]
+                def calculate_arc(text):
+                    words = text.split()
+                    chunk_size = max(1, len(words) // 100)
+                    segments = []
+                    for i in range(100):
+                        start = i * chunk_size
+                        end = (i + 1) * chunk_size if i < 99 else len(words)
+                        chunk_text = " ".join(words[start:end])
+                        score = sia.polarity_scores(chunk_text)['compound']
+                        segments.append(score)
+                    return segments
                 
-                page_scores = calculate_arc(analyzed_pages)
-                df_arc = pd.DataFrame({'Page': range(start_page, start_page + len(page_scores)), 'Sentiment': page_scores})
+                segment_scores = calculate_arc(analyzed_text)
                 
-                fig = px.line(df_arc, x='Page', y='Sentiment', title="Overall Emotional Arc of the Text",
-                              markers=True, template="plotly_white", color_discrete_sequence=['#4361ee'])
-                fig.update_layout(yaxis_title="Sentiment (Compound Score)", xaxis_title="Actual Page Number")
+                df_arc = pd.DataFrame({
+                    'Story Progress (%)': range(1, 101),
+                    'Raw Sentiment': segment_scores
+                })
+                
+                # Apply Rolling Mean for smoothing
+                df_arc['Smoothed Narrative Arc'] = df_arc['Raw Sentiment'].rolling(window=8, min_periods=1).mean()
+                
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=df_arc['Story Progress (%)'], y=df_arc['Smoothed Narrative Arc'],
+                                         mode='lines', line=dict(color='#ef476f', width=4),
+                                         name='Narrative Arc'))
+                fig.add_trace(go.Scatter(x=df_arc['Story Progress (%)'], y=df_arc['Raw Sentiment'],
+                                         mode='lines', line=dict(color='gray', width=1, dash='dot'),
+                                         opacity=0.4, name='Micro-Sentiment (Raw)'))
+                
+                fig.update_layout(title="Smoothed Emotional Progression", 
+                                  yaxis_title="Sentiment (Compound Score)", 
+                                  xaxis_title="Story Progress (%)",
+                                  template="plotly_white")
                 fig.add_hline(y=0, line_dash="dash", line_color="black")
-                fig.update_traces(line=dict(width=3), marker=dict(size=8))
                 st.plotly_chart(fig, use_container_width=True)
 
     # ==========================================
-    # TAB 3: CHARACTER EMOTIONS & CONTEXT
+    # TAB 3: CHARACTER EMOTIONS & CONTEXT (Truncated)
     # ==========================================
     with tab3:
         st.header("Character Emotional Profiling")
@@ -254,7 +352,6 @@ if uploaded_file is not None:
                         col2.metric("Baseline Sentiment", f"{avg_sentiment:.2f}")
                         col3.metric("Dominant Vibe", "Positive 🟢" if avg_sentiment > 0 else "Negative 🔴")
                         
-                        # Graph
                         df_char = pd.DataFrame({'Story Progress (%)': char_progress, 'Sentiment': char_sentiment})
                         df_char['Smoothed'] = df_char['Sentiment'].rolling(window=max(2, len(char_sentiment)//8), min_periods=1).mean()
 
@@ -270,7 +367,6 @@ if uploaded_file is not None:
                                           yaxis_title="Sentiment Score", template="plotly_white", yaxis_range=[-1.1, 1.1])
                         st.plotly_chart(fig, use_container_width=True)
 
-                        # --- CONTEXT EXPLORER ---
                         st.markdown("---")
                         st.subheader("🔍 Context Explorer")
                         st.markdown(f"Select a specific part of the story to read the exact sentences involving **{selected_char}**.")
@@ -281,13 +377,14 @@ if uploaded_file is not None:
                                               if prog_min <= p <= prog_max]
                         
                         if filtered_sentences:
-                            st.write(f"Found **{len(filtered_sentences)}** occurrences in this range. *(Displaying max 25)*")
+                            st.write(f"Found **{len(filtered_sentences)}** occurrences in this range. *(Displaying max 25, capped at 100 words)*")
                             for p, txt, sc in filtered_sentences[:25]:
                                 color = "#d8f3dc" if sc > 0.3 else ("#ffe5d9" if sc < -0.3 else "#f8f9fa")
+                                txt_disp = truncate_text(txt, 100)
                                 st.markdown(f"""
                                 <div style='background-color:{color}; padding:10px; border-radius:5px; margin-bottom:8px; border-left: 4px solid gray;'>
                                     <small style='color:gray;'>Progress: {p:.1f}% | Emotion Score: {sc:.2f}</small><br>
-                                    {txt}
+                                    {txt_disp}
                                 </div>
                                 """, unsafe_allow_html=True)
                         else:
@@ -298,7 +395,7 @@ if uploaded_file is not None:
             st.info("💡 Please generate the 'Character Network' in Tab 1 first to identify the main characters.")
 
     # ==========================================
-    # TAB 4: THEMATIC ANALYSIS & CONTEXT
+    # TAB 4: THEMATIC ANALYSIS & CONTEXT (Truncated)
     # ==========================================
     with tab4:
         st.header("Thematic Analysis")
@@ -324,7 +421,6 @@ if uploaded_file is not None:
                                  color='Frequency', color_continuous_scale='Viridis', template="plotly_white")
                     st.plotly_chart(fig, use_container_width=True)
                     
-                    # --- CONTEXT EXPLORER ---
                     st.markdown("---")
                     st.subheader("🔍 Context Explorer")
                     st.markdown("Select a theme to see the exact sentences where it is used in the text.")
@@ -334,11 +430,11 @@ if uploaded_file is not None:
                     
                     if selected_theme:
                         matches = [s for s in sentences if re.search(rf'\b{re.escape(selected_theme)}\b', s, re.IGNORECASE)]
-                        st.write(f"Found **{len(matches)}** sentences containing '*{selected_theme}*'. *(Displaying max 25)*")
+                        st.write(f"Found **{len(matches)}** sentences containing '*{selected_theme}*'. *(Displaying max 25, capped at 100 words)*")
                         
                         for m in matches[:25]:
-                            # Highlight the word in the sentence
-                            highlighted = re.sub(rf'(\b{re.escape(selected_theme)}\b)', r'**\1**', m, flags=re.IGNORECASE)
+                            m_trunc = truncate_text(m, 100)
+                            highlighted = re.sub(rf'(\b{re.escape(selected_theme)}\b)', r'**\1**', m_trunc, flags=re.IGNORECASE)
                             st.markdown(f"- {highlighted}")
                 else:
                     st.warning("Could not extract enough data for thematic analysis.")
@@ -391,7 +487,7 @@ if uploaded_file is not None:
                         st.plotly_chart(fig_read, use_container_width=True)
 
     # ==========================================
-    # TAB 6: AI REFLECTION
+    # TAB 6: AI REFLECTION (Truncated)
     # ==========================================
     with tab6:
         st.header("Critical AI Evaluation")
@@ -413,10 +509,14 @@ if uploaded_file is not None:
                 col_neg, col_pos = st.columns(2)
                 with col_neg:
                     st.error("#### 🔴 Top 3 Negative Fragments")
-                    for item in top_3_neg: st.markdown(f"<div style='background:#ffe5d9;padding:10px;border-radius:5px;margin-bottom:10px;'><strong>Score: {item['score']:.2f}</strong><br><em>\"{item['text']}\"</em></div>", unsafe_allow_html=True)
+                    for item in top_3_neg: 
+                        trunc_txt = truncate_text(item['text'], 100)
+                        st.markdown(f"<div style='background:#ffe5d9;padding:10px;border-radius:5px;margin-bottom:10px;'><strong>Score: {item['score']:.2f}</strong><br><em>\"{trunc_txt}\"</em></div>", unsafe_allow_html=True)
                 with col_pos:
                     st.success("#### 🟢 Top 3 Positive Fragments")
-                    for item in top_3_pos: st.markdown(f"<div style='background:#d8f3dc;padding:10px;border-radius:5px;margin-bottom:10px;'><strong>Score: {item['score']:.2f}</strong><br><em>\"{item['text']}\"</em></div>", unsafe_allow_html=True)
+                    for item in top_3_pos: 
+                        trunc_txt = truncate_text(item['text'], 100)
+                        st.markdown(f"<div style='background:#d8f3dc;padding:10px;border-radius:5px;margin-bottom:10px;'><strong>Score: {item['score']:.2f}</strong><br><em>\"{trunc_txt}\"</em></div>", unsafe_allow_html=True)
 
 else:
     st.info("Please upload a PDF document in the sidebar to begin your literary analysis.")
