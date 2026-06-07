@@ -3,11 +3,10 @@ import PyPDF2
 import spacy
 import nltk
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-import networkx as nx
 import matplotlib.pyplot as plt
 import seaborn as sns
+import plotly.graph_objects as go
 from collections import Counter
-import itertools
 import re
 import subprocess
 import sys
@@ -21,12 +20,12 @@ plt.rcParams['font.family'] = 'sans-serif'
 plt.rcParams['figure.dpi'] = 150
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="Literary Dashboard", layout="wide")
-st.title("📚 The Ultimate Literary Analysis Dashboard")
-st.markdown("Upload a novel (PDF), select a range of pages, and let AI uncover its hidden structures.")
+st.set_page_config(page_title="Scientific Lit-Dashboard", layout="wide")
+st.title("🔬 Scientific Literary Analysis Dashboard")
+st.markdown("Onderzoekscyclus en Stijlanalyse voor de 3de graad Moderne Talen.")
 
 # --- CACHING MODELS & DATA ---
-@st.cache_resource(show_spinner="Configuring AI... (first time only, please wait)")
+@st.cache_resource(show_spinner="Laden van AI-modellen (eenmalig)...")
 def load_models():
     nltk.download('punkt', quiet=True)
     try:
@@ -76,470 +75,241 @@ def get_chunks(text, chunk_size=50000):
     if current_chunk:
         yield " ".join(current_chunk)
 
-# --- BULLETPROOF ENTITY RESOLUTION PIPELINE ---
-def clean_entity_name(text):
-    """Advanced Cleansing: Strips possessives, titles, and noise words."""
-    # 1. Strip possessives
-    text = re.split(r"['’]s\b", text, flags=re.IGNORECASE)[0]
-    
-    # 2. Strip common titles
-    titles = [r'\bMr\.?\s', r'\bMrs\.?\s', r'\bMs\.?\s', r'\bMiss\s', 
-              r'\bDr\.?\s', r'\bAunt\s', r'\bUncle\s', r'\bProfessor\s', 
-              r'\bCaptain\s', r'\bLord\s', r'\bLady\s', r'\bSir\s']
-    for t in titles:
-        text = re.sub(t, "", text, flags=re.IGNORECASE)
-        
-    # 3. Aggressive case-insensitive blacklist for sentence-starting noise words
-    ignore_words = {
-        "suppose", "suddenly", "well", "yes", "no", "oh", "ah", "hey", "say", "let", 
-        "come", "look", "see", "think", "know", "don", "maybe", "perhaps", "then", 
-        "now", "and", "but", "or", "so", "why", "what", "when", "where", "how", 
-        "good", "god", "dear", "please", "just", "looking", "man", "woman", "boy", "girl"
-    }
-    
-    words = []
-    for w in text.split():
-        # Keep only alphabetic characters
-        clean_w = re.sub(r'[^A-Za-z]', '', w)
-        # Must be Title cased and not in the blacklist
-        if clean_w.istitle() and clean_w.lower() not in ignore_words:
-            words.append(clean_w)
-            
-    return " ".join(words).strip()
-
-def resolve_entities(raw_char_counts, raw_interactions):
-    """Token-Based Clustering: Maps partial names to canonical full names."""
-    unique_names = list(raw_char_counts.keys())
-    
-    # Sort names by frequency descending to prioritize popular characters as canonical anchors
-    unique_names.sort(key=lambda x: raw_char_counts[x], reverse=True)
-    
-    # Identify potential full names (2 or more tokens)
-    full_names = [n for n in unique_names if len(n.split()) > 1]
-    
-    name_mapping = {}
-    for name in unique_names:
-        name_tokens = set(name.split())
-        best_match = name
-        best_match_count = -1
-        
-        for fn in full_names:
-            if name == fn:
-                continue
-            fn_tokens = set(fn.split())
-            
-            # If the current name is a subset of a full name (e.g., "Nick" is subset of "Nick Carraway")
-            if name_tokens.issubset(fn_tokens):
-                # Map to the most frequent full name
-                if raw_char_counts[fn] > best_match_count:
-                    best_match = fn
-                    best_match_count = raw_char_counts[fn]
-        
-        name_mapping[name] = best_match
-
-    # Collapse transitive mappings just in case (A->B, B->C becomes A->C)
-    for name in name_mapping:
-        current = name
-        visited = set()
-        while name_mapping[current] != current and current not in visited:
-            visited.add(current)
-            current = name_mapping[current]
-        name_mapping[name] = current
-
-    # Rebuild consolidated counts
-    char_counts = Counter()
-    for name, count in raw_char_counts.items():
-        canonical_name = name_mapping.get(name, name)
-        char_counts[canonical_name] += count
-
-    # Rebuild consolidated interactions
-    interactions = {}
-    for (c1, c2), data in raw_interactions.items():
-        m1 = name_mapping.get(c1, c1)
-        m2 = name_mapping.get(c2, c2)
-        if m1 != m2: 
-            pair = tuple(sorted([m1, m2]))
-            if pair not in interactions:
-                interactions[pair] = {'weight': 0, 'sentiment': []}
-            interactions[pair]['weight'] += data['weight']
-            interactions[pair]['sentiment'].extend(data['sentiment'])
-            
-    return char_counts, interactions
+def count_syllables(word):
+    """Simpele heuristiek om lettergrepen te tellen voor de Flesch-Kincaid score."""
+    word = word.lower()
+    if len(word) <= 3:
+        return 1
+    word = re.sub(r'(?:[^laeiouy]es|ed|[^laeiouy]e)$', '', word)
+    word = re.sub(r'^y', '', word)
+    matches = re.findall(r'[aeiouy]{1,2}', word)
+    return max(1, len(matches))
 
 # --- SIDEBAR UPLOAD & SETTINGS ---
-st.sidebar.header("1. Upload Book")
-uploaded_file = st.sidebar.file_uploader("Choose a PDF file", type="pdf")
+st.sidebar.header("1. Upload Bronmateriaal")
+uploaded_file = st.sidebar.file_uploader("Upload Engelstalige roman (PDF)", type="pdf")
 
 if uploaded_file is not None:
-    with st.spinner("Reading PDF structure..."):
+    with st.spinner("PDF structuur analyseren..."):
         all_pages = extract_all_pages(uploaded_file)
         total_pages = len(all_pages)
 
     st.sidebar.markdown("---")
-    st.sidebar.header("2. Analysis Limits")
-    st.sidebar.info("To prevent memory crashes on large books, limit the scope of the analysis.")
+    st.sidebar.header("2. Afbakening Onderzoek")
+    st.sidebar.info("Beperk de data om 'overfitting' van je analyse te voorkomen en verwerkingstijd te sparen.")
     
     max_limit = min(total_pages, 200)
-    selected_page_count = st.sidebar.slider("Number of pages to analyze", min_value=10, max_value=max_limit, value=max_limit)
-    read_direction = st.sidebar.radio("Extract text from:", ["Beginning of book", "End of book"])
+    selected_page_count = st.sidebar.slider("Aantal te analyseren pagina's", min_value=10, max_value=max_limit, value=max_limit)
+    read_direction = st.sidebar.radio("Selecteer brondeel:", ["Begin van het boek", "Einde van het boek"])
 
-    if read_direction == "Beginning of book":
+    if read_direction == "Begin van het boek":
         target_pages = all_pages[:selected_page_count]
-        st.sidebar.success(f"Analyzing pages 1 to {selected_page_count}.")
     else:
         target_pages = all_pages[-selected_page_count:]
-        st.sidebar.success(f"Analyzing the final {selected_page_count} pages.")
 
     text_data = re.sub(r'\s+', ' ', " ".join(target_pages))
     chunks = list(get_chunks(text_data))
     total_chunks = len(chunks)
-    
-    # Reset tracking state if text changes
-    current_hash = hash(text_data)
-    if st.session_state.get('text_hash') != current_hash:
-        if 'social_data' in st.session_state:
-            del st.session_state['social_data']
-        st.session_state['text_hash'] = current_hash
 
-    # Create Tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "1. Style Scanner", 
-        "2. Emotion Arc", 
-        "3. Social Network", 
-        "4. Gender Bias", 
-        "5. Color Palette"
+    # --- TABS VOOR DE ONDERZOEKSCYCLUS ---
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📖 1. Didactisch Kader", 
+        "🧠 2. Thematische Lemmatisering", 
+        "⚙️ 3. Linguïstische Stijl & Register", 
+        "🎭 4. Figuratieve Taalreflectie"
     ])
 
     # ==========================================
-    # TAB 1: STYLE SCANNER
+    # TAB 1: DIDACTISCH KADER (LEERPLANDOELEN)
     # ==========================================
     with tab1:
-        st.header("Comparative Style Scanner")
-        st.info(f"**Legend:** Analyzing average sentence length over the selected {selected_page_count} pages. High peaks indicate long, complex sentences.")
+        st.header("Onderzoeksdoelen & Verantwoording")
+        st.markdown("""
+        Dit dashboard is ontworpen ter ondersteuning van de **Onderzoekscyclus Literatuur** in de 3de graad Moderne Talen. 
+        De output van de verschillende modules helpt je bij het behalen van de volgende specifieke leerplandoelen (Engels):
+        """)
         
-        if st.button("Run Style Analysis"):
+        st.info("**WD3_01.01.01: Doorlopen van de onderzoekscyclus**\n\nJe gebruikt dit dashboard om kritisch data (literaire bronnen) te verzamelen, te ordenen via parameters (pagina-selecties), en de verwerkte visuele data te interpreteren om een onderzoeksvraag te beantwoorden.")
+        st.success("**WD3_02.20.01: Analyseren van poëticale en narratieve structuren**\n\nMet behulp van technologische ondersteuning onderzoek je de stilistische keuzes van een auteur uit de wereldliteratuur (zoals woordkeuze, syntax en actiegerichtheid).")
+        st.warning("**WD3_02.07.04: Verklaren van automatische analyses**\n\nIn de tab *Linguïstische Stijl* en *Lemmatisering* maak je gebruik van Natural Language Processing (NLP). Je leert begrijpen hoe de computer tekst opbreekt (parsing), woorden terugbrengt naar hun stamvorm (lemmatisering) en woordsoorten toekent (POS-tagging).")
+        st.error("**WD3_02.07.03: Beperkingen van AI evalueren**\n\nIn de tab *Figuratieve Taalreflectie* controleer je handmatig de door de AI berekende sentiment-scores. Je leert hoe AI vaak 'struikelt' over ironie, sarcasme, of cultureel impliciet taalgebruik.")
+
+    # ==========================================
+    # TAB 2: THEMATISCHE LEMMATISERING
+    # ==========================================
+    with tab2:
+        st.header("Thematische Lemmatisering")
+        st.markdown("**Doel:** Achterhaal de kernthema's door alle inhoudswoorden (zelfstandige naamwoorden) terug te brengen naar hun woordenboekvorm (lemma).")
+
+        if st.button("Genereer Thematische Lemma's"):
             progress_bar = st.progress(0)
             status_text = st.empty()
-            sent_lengths = []
             
-            for i, doc in enumerate(nlp.pipe(chunks, disable=["ner", "lemmatizer", "textcat", "custom"])):
-                for s in doc.sents:
-                    length = len([t for t in s if not t.is_punct])
-                    if length > 2: 
-                        sent_lengths.append(length)
-                
+            lemma_counts = Counter()
+            
+            for i, doc in enumerate(nlp.pipe(chunks, disable=["ner", "textcat", "custom"])):
+                for token in doc:
+                    # Filter: moet een noun zijn, geen stopwoord, geen interpunctie, alleen alfabetisch
+                    if token.pos_ == "NOUN" and not token.is_stop and token.is_alpha and len(token.text) > 2:
+                        lemma_counts[token.lemma_.lower()] += 1
+                        
                 progress_bar.progress((i + 1) / total_chunks)
-                status_text.text(f"Processing chunk {i + 1} of {total_chunks}...")
+                status_text.text(f"Lemmatiseren: deel {i + 1} van {total_chunks}...")
                 gc.collect()
 
-            status_text.text("Generating visual...")
-            if sent_lengths:
-                avg_len = sum(sent_lengths) / len(sent_lengths)
-                st.metric("Average Sentence Length", f"{avg_len:.1f} words")
+            status_text.text("Genereren van Top 20...")
+            
+            if lemma_counts:
+                top_lemmas = lemma_counts.most_common(20)
+                lemmas, counts = zip(*top_lemmas)
                 
-                window = max(30, len(sent_lengths) // 100) 
-                smoothed = [sum(sent_lengths[i:i+window])/window for i in range(len(sent_lengths)-window+1)]
-                
-                fig, ax = plt.subplots(figsize=(10, 4))
-                ax.plot(smoothed, color='#2b8cbe', linewidth=2)
-                ax.fill_between(range(len(smoothed)), smoothed, color='#2b8cbe', alpha=0.2)
-                ax.set_title("Sentence Length Over Time", fontsize=14, fontweight='bold')
-                ax.set_ylabel("Words per Sentence")
-                ax.set_xlabel("Story Progression (Sentences)")
+                fig, ax = plt.subplots(figsize=(12, 6))
+                sns.barplot(x=list(counts), y=list(lemmas), palette="viridis", ax=ax)
+                ax.set_title("Top 20 Meest Voorkomende Zelfstandige Naamwoorden (Lemma's)", fontsize=14, fontweight='bold')
+                ax.set_xlabel("Frequentie")
+                ax.set_ylabel("Lemma (Woordenboekvorm)")
                 sns.despine()
                 st.pyplot(fig)
                 plt.close(fig)
                 
+                st.markdown("### 📝 Reflectievraag voor je onderzoek:")
+                st.write("> *Zijn er lemma's in de bovenstaande lijst die wijzen op een overkoepelend motief of thema in het gekozen romanfragment? Hoe sturen deze woorden de perceptie van de lezer?*")
+            
             progress_bar.empty()
             status_text.empty()
 
     # ==========================================
-    # TAB 2: VONNEGUT ARC
-    # ==========================================
-    with tab2:
-        st.header("The Vonnegut Emotion Arc")
-        st.info("**Legend:** The Y-axis represents the emotional tone (-1 is extreme negativity/tragedy, +1 is extreme positivity/joy).")
-
-        if st.button("Run Emotion Arc"):
-            with st.spinner("Calculating sentiment..."):
-                sentences = re.split(r'(?<=[.!?]) +', text_data)
-                scores = []
-                for s in sentences:
-                    if len(s) > 10:
-                        scores.append(sia.polarity_scores(s)['compound'])
-                gc.collect()
-
-                if scores:
-                    window = max(1, len(scores) // 20)
-                    smoothed = [sum(scores[i:i+window])/window for i in range(len(scores)-window+1)]
-                    x_perc = [(i / len(smoothed)) * 100 for i in range(len(smoothed))]
-                    
-                    fig, ax = plt.subplots(figsize=(10, 4))
-                    ax.plot(x_perc, smoothed, color='#8856a7', linewidth=2.5)
-                    ax.fill_between(x_perc, smoothed, 0, where=pd.Series(smoothed) > 0, color='green', alpha=0.2, interpolate=True)
-                    ax.fill_between(x_perc, smoothed, 0, where=pd.Series(smoothed) < 0, color='red', alpha=0.2, interpolate=True)
-                    
-                    ax.axhline(0, color='black', linewidth=1, linestyle='--')
-                    ax.set_title(f"Narrative Sentiment Arc ({selected_page_count} pages)", fontsize=14, fontweight='bold')
-                    ax.set_xlabel("Story Progress (%)")
-                    ax.set_ylabel("Sentiment Score")
-                    sns.despine()
-                    st.pyplot(fig)
-                    plt.close(fig)
-
-    # ==========================================
-    # TAB 3: SOCIAL NETWORK & RELATIONSHIPS
+    # TAB 3: LINGUÏSTISCHE STIJL & REGISTER
     # ==========================================
     with tab3:
-        st.header("Social Web & Relationship Dynamics")
-        st.info("**Legend:**\n- **Node Size:** Frequency of mentions.\n- **Edge Thickness:** Interaction frequency.\n- **Edge Color:** Green = Positive, Red = Negative, Grey = Neutral.")
+        st.header("Linguïstische Stijlanalyse (POS-tagging & Syntaxis)")
+        st.markdown("**Doel:** Bereken het taalkundig register en de schrijfstijl van de auteur met behulp van AI Part-of-Speech (POS) tagging en complexiteitsalgoritmes.")
 
-        if st.button("Run Social Analysis"):
+        if st.button("Voer Stijl- en Registeranalyse uit"):
             progress_bar = st.progress(0)
-            status_text = st.empty()
-            raw_char_counts = Counter()
-            raw_interactions = {}
-
-            # STEP 1: Extraction & Cleansing
-            for i, doc in enumerate(nlp.pipe(chunks, disable=["tagger", "parser", "lemmatizer", "textcat", "custom"])):
+            
+            total_sentences = 0
+            total_words = 0
+            total_syllables = 0
+            
+            adj_count = 0
+            verb_count = 0
+            
+            for i, doc in enumerate(nlp.pipe(chunks, disable=["ner", "textcat", "custom"])):
                 for sent in doc.sents:
-                    raw_chars = [ent.text for ent in sent.ents if ent.label_ == "PERSON" and len(ent.text) > 2]
-                    
-                    cleaned_chars = set()
-                    for char in raw_chars:
-                        clean_name = clean_entity_name(char)
-                        if len(clean_name) > 2: 
-                            cleaned_chars.add(clean_name)
-                    
-                    for char in cleaned_chars:
-                        raw_char_counts[char] += 1
-                    
-                    if len(cleaned_chars) > 1:
-                        sent_score = sia.polarity_scores(sent.text)['compound']
-                        for c1, c2 in itertools.combinations(cleaned_chars, 2):
-                            pair = tuple(sorted([c1, c2]))
-                            if pair not in raw_interactions:
-                                raw_interactions[pair] = {'weight': 0, 'sentiment': []}
-                            raw_interactions[pair]['weight'] += 1
-                            raw_interactions[pair]['sentiment'].append(sent_score)
-                
+                    total_sentences += 1
+                    for token in sent:
+                        if token.is_alpha:
+                            total_words += 1
+                            total_syllables += count_syllables(token.text)
+                            
+                            if token.pos_ == "ADJ":
+                                adj_count += 1
+                            elif token.pos_ == "VERB":
+                                verb_count += 1
                 progress_bar.progress((i + 1) / total_chunks)
-                status_text.text(f"Extracting entities: chunk {i + 1} of {total_chunks}...")
                 gc.collect()
 
-            status_text.text("Applying Entity Resolution Clustering...")
-            
-            # STEP 2: Token-Based Clustering
-            char_counts, interactions = resolve_entities(raw_char_counts, raw_interactions)
+            # 1. Syntactische Complexiteit & Leesbaarheid (Flesch-Kincaid)
+            if total_sentences > 0 and total_words > 0:
+                avg_sentence_length = total_words / total_sentences
+                
+                # Flesch Reading Ease Formula
+                flesch_score = 206.835 - 1.015 * (total_words / total_sentences) - 84.6 * (total_syllables / total_words)
+                
+                if flesch_score > 80: register = "Zeer Informeel / Kinderlijk (Conversational)"
+                elif flesch_score > 60: register = "Standaard / Toegankelijk (Average Reader)"
+                elif flesch_score > 30: register = "Complex / Formeel (College Level)"
+                else: register = "Zeer Academisch / Archaïsch (Difficult)"
 
-            if char_counts:
-                top_chars = [c for c, count in char_counts.most_common(15)]
-                # Save to session state to render graph and populate dropdowns
-                st.session_state['social_data'] = {
-                    'top_chars': top_chars,
-                    'char_counts': char_counts,
-                    'interactions': interactions
-                }
-            
-            progress_bar.empty()
-            status_text.empty()
+                col1, col2 = st.columns(2)
+                col1.metric("Gemiddelde Zinslengte (Words/Sent)", f"{avg_sentence_length:.1f}")
+                col2.metric("Flesch Readability Score", f"{flesch_score:.1f}")
+                
+                st.info(f"**Register Analyse:** Op basis van de syntactische complexiteit wordt het register van dit tekstdeel beoordeeld als: **{register}**.")
 
-        # STEP 3: Display Graph and Relationship Tracker
-        if 'social_data' in st.session_state:
-            top_chars = st.session_state['social_data']['top_chars']
-            char_counts = st.session_state['social_data']['char_counts']
-            interactions = st.session_state['social_data']['interactions']
-
-            G = nx.Graph()
-            for char in top_chars:
-                G.add_node(char, weight=char_counts[char])
-                
-            for (c1, c2), data in interactions.items():
-                if c1 in top_chars and c2 in top_chars:
-                    avg_sent = sum(data['sentiment']) / len(data['sentiment']) if data['sentiment'] else 0
-                    if avg_sent > 0.15: color = '#2ec4b6'
-                    elif avg_sent < -0.15: color = '#e71d36'
-                    else: color = '#cccccc'
-                    G.add_edge(c1, c2, weight=data['weight'], color=color)
-
-            if len(G.nodes) > 0:
-                fig, ax = plt.subplots(figsize=(14, 10), facecolor='#fafafa')
-                ax.set_facecolor('#fafafa')
-                
-                pos = nx.spring_layout(G, k=0.8, iterations=60, seed=42)
-                
-                node_weights = [nx.get_node_attributes(G, 'weight')[n] for n in G.nodes()]
-                max_node_w = max(node_weights) if node_weights else 1
-                node_sizes = [(w / max_node_w) * 2200 + 400 for w in node_weights]
-                
-                edge_colors = [nx.get_edge_attributes(G, 'color')[e] for e in G.edges()]
-                weights = [nx.get_edge_attributes(G, 'weight')[e] for e in G.edges()]
-                max_edge_w = max(weights) if weights else 1
-                scaled_edge_widths = [(w / max_edge_w) * 6 + 1.5 for w in weights]
-                
-                nx.draw_networkx_edges(G, pos, width=scaled_edge_widths, edge_color=edge_colors, 
-                                       alpha=0.4, connectionstyle="arc3,rad=0.2", ax=ax)
-                
-                nx.draw_networkx_nodes(G, pos, node_size=node_sizes, node_color=node_weights, 
-                                       cmap=plt.cm.Blues, edgecolors='#1e3d59', linewidths=1.8, ax=ax)
-                
-                nx.draw_networkx_labels(G, pos, font_size=11, font_family='sans-serif', font_weight='bold',
-                                        font_color='#1e3d59',
-                                        bbox=dict(facecolor='#ffffff', edgecolor='#1e3d59', alpha=0.9, 
-                                                  boxstyle='round,pad=0.3', linewidth=1), ax=ax)
-                
-                ax.set_title("✨ Dynamic Character Interaction Network", fontsize=18, fontweight='bold', color='#1e3d59', pad=20)
-                plt.axis('off')
-                st.pyplot(fig)
-                plt.close(fig)
-
+            # 2. POS Gauge: Action vs Descriptive
             st.markdown("---")
-            st.subheader("📈 Relationship Evolution Tracker")
-            st.info("Select two resolved characters from the network above to track their emotional dynamic over time.")
-            
-            # Automatically populate selectboxes using resolved canonical names
-            col1, col2 = st.columns(2)
-            char1 = col1.selectbox("First Character", top_chars, index=0)
-            char2 = col2.selectbox("Second Character", top_chars, index=1 if len(top_chars) > 1 else 0)
+            if (adj_count + verb_count) > 0:
+                verb_ratio = verb_count / (adj_count + verb_count)
+                
+                fig = go.Figure(go.Indicator(
+                    mode = "gauge+number",
+                    value = verb_ratio * 100,
+                    title = {'text': "Auteur Stijl: Descriptief vs. Actiegericht", 'font': {'size': 18}},
+                    number = {'suffix': "% Werkwoorden"},
+                    gauge = {
+                        'axis': {'range': [None, 100], 'tickwidth': 1},
+                        'bar': {'color': "#1e3d59"},
+                        'steps': [
+                            {'range': [0, 40], 'color': "#a8dadc"},     # Descriptive
+                            {'range': [40, 60], 'color': "#f1faee"},    # Balanced
+                            {'range': [60, 100], 'color': "#e63946"}    # Action
+                        ],
+                        'threshold': {
+                            'line': {'color': "black", 'width': 4},
+                            'thickness': 0.75,
+                            'value': verb_ratio * 100
+                        }
+                    }
+                ))
+                
+                fig.add_annotation(x=0.1, y=0, text="Descriptive (Poetic)", showarrow=False, font=dict(size=14, color="#1d3557"))
+                fig.add_annotation(x=0.9, y=0, text="Action-oriented (Dynamic)", showarrow=False, font=dict(size=14, color="#e63946"))
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                st.markdown("### 📝 Reflectievraag voor je onderzoek:")
+                st.write("> *Een score onder de 40% wijst op veel bijvoeglijke naamwoorden (descriptief/poëtisch). Boven de 60% wijst op veel werkwoorden (actie/plot-gedreven). Komt dit overeen met jouw leeservaring van de auteur?*")
 
-            if st.button("Trace Relationship"):
-                with st.spinner(f"Tracing {char1} & {char2}..."):
-                    sentences = re.split(r'(?<=[.!?]) +', text_data)
-                    progression, sentiments = [], []
-
-                    for i, s in enumerate(sentences):
-                        # Use the first token of the canonical name for robust matching in sentences
-                        c1_base = char1.split()[0]
-                        c2_base = char2.split()[0]
-                        
-                        if re.search(rf'\b{re.escape(c1_base)}\b', s, re.IGNORECASE) and re.search(rf'\b{re.escape(c2_base)}\b', s, re.IGNORECASE):
-                            score = sia.polarity_scores(s)['compound']
-                            sentiments.append(score)
-                            progression.append((i / len(sentences)) * 100)
-                    gc.collect()
-
-                    if len(sentiments) < 3:
-                        st.warning(f"Not enough direct interactions found between **{char1}** and **{char2}** to draw a trendline.")
-                    else:
-                        df = pd.DataFrame({'Progress': progression, 'Sentiment': sentiments})
-                        
-                        fig, ax = plt.subplots(figsize=(10, 5))
-                        sns.scatterplot(data=df, x='Progress', y='Sentiment', color='#1f77b4', s=60, alpha=0.6, ax=ax, label="Interaction")
-                        sns.regplot(data=df, x='Progress', y='Sentiment', scatter=False, order=3, color='#e41a1c', label="Trend")
-                        
-                        ax.axhline(0, color='black', linewidth=1, linestyle='--')
-                        ax.set_title(f"Relationship Evolution: {char1} & {char2}", fontsize=14, fontweight='bold')
-                        ax.set_xlabel("Selected Text Progress (%)")
-                        ax.set_ylabel("Interaction Sentiment (-1 to +1)")
-                        ax.legend()
-                        sns.despine()
-                        st.pyplot(fig)
-                        plt.close(fig)
+            progress_bar.empty()
 
     # ==========================================
-    # TAB 4: GENDER BIAS
+    # TAB 4: FIGURATIEVE TAALREFLECTIE
     # ==========================================
     with tab4:
-        st.header("Gender-Bias Agency Scanner")
-        st.info("**Legend:** Displays the top 10 verbs directly associated with male vs female entities. Neutral verbs ('turn', 'go') are aggressively filtered.")
+        st.header("Figuratieve Taal & AI Sentiment Evaluatie")
+        st.markdown("**Doel:** Evalueer de beperkingen van kunstmatige intelligentie. AI beoordeelt tekst vaak uiterst letterlijk. Zoek naar ironie, sarcasme, of metaforen in de uitschieters.")
 
-        if st.button("Run Gender Analysis"):
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            m_verbs, f_verbs = Counter(), Counter()
-            m_terms = {'he', 'him', 'his', 'man', 'men', 'boy', 'boys', 'father', 'brother', 'husband', 'uncle', 'gentleman'}
-            f_terms = {'she', 'her', 'hers', 'woman', 'women', 'girl', 'girls', 'mother', 'sister', 'wife', 'aunt', 'lady'}
-            stop_v = {
-                'be', 'have', 'do', 'go', 'get', 'know', 'think', 'say', 'see', 'look', 
-                'come', 'tell', 'ask', 'seem', 'turn', 'move', 'start', 'begin', 'stop', 
-                'use', 'try', 'feel', 'leave', 'make', 'take', 'give', 'find', 'call', 
-                'want', 'let', 'put', 'keep', 'show', 'hold', 'bring', 'become', 'mean'
-            }
-
-            for i, doc in enumerate(nlp.pipe(chunks, disable=["ner", "textcat", "custom"])):
-                for token in doc:
-                    if token.dep_ == "nsubj" and token.head.pos_ == "VERB":
-                        subj = token.text.lower()
-                        verb = token.head.lemma_.lower()
-                        if verb not in stop_v and len(verb) > 2:
-                            if subj in m_terms: 
-                                m_verbs[verb] += 1
-                            elif subj in f_terms: 
-                                f_verbs[verb] += 1
+        if st.button("Isoleer Extremen voor Handmatige Controle"):
+            with st.spinner("VADER Sentiment Analyzer leest zinnen..."):
+                sentences = re.split(r'(?<=[.!?]) +', text_data)
+                scored_sentences = []
                 
-                progress_bar.progress((i + 1) / total_chunks)
-                status_text.text(f"Scanning grammar: chunk {i + 1} of {total_chunks}...")
-                gc.collect()
-
-            status_text.text("Generating visual...")
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-            
-            if m_verbs:
-                v, c = zip(*m_verbs.most_common(10))
-                sns.barplot(x=list(c), y=list(v), ax=ax1, color='#3182bd')
-                ax1.set_title("Top Male Actions", fontsize=12, fontweight='bold')
-                ax1.set_xlabel("Frequency")
-            
-            if f_verbs:
-                v, c = zip(*f_verbs.most_common(10))
-                sns.barplot(x=list(c), y=list(v), ax=ax2, color='#e6550d')
-                ax2.set_title("Top Female Actions", fontsize=12, fontweight='bold')
-                ax2.set_xlabel("Frequency")
-            
-            sns.despine()
-            plt.tight_layout()
-            st.pyplot(fig)
-            plt.close(fig)
-            
-            progress_bar.empty()
-            status_text.empty()
-
-    # ==========================================
-    # TAB 5: COLOR PALETTE
-    # ==========================================
-    with tab5:
-        st.header("The Aesthetic Color Palette")
-        st.info("**Legend:** A proportional visual breakdown of how often specific colors are explicitly mentioned.")
-
-        if st.button("Extract Colors"):
-            with st.spinner("Scanning for aesthetic keywords..."):
-                colors = {
-                    'red': '#e41a1c', 'crimson': '#bd0026', 'blue': '#377eb8', 
-                    'green': '#4daf4a', 'yellow': '#dede00', 'gold': '#ff7f00', 
-                    'white': '#f0f0f0', 'black': '#252525', 'grey': '#969696', 'gray': '#969696',
-                    'pink': '#f781bf', 'purple': '#984ea3', 'brown': '#a65628'
-                }
-                found_colors = Counter()
-                words = re.findall(r'\b[a-zA-Z]+\b', text_data.lower())
-                for w in words:
-                    if w in colors:
-                        found_colors[w] += 1
+                for s in sentences:
+                    s_clean = s.strip().replace('\n', ' ')
+                    # We kijken enkel naar volwaardige zinnen (meer dan 8 woorden)
+                    if len(s_clean.split()) > 8:
+                        score = sia.polarity_scores(s_clean)['compound']
+                        scored_sentences.append({'text': s_clean, 'score': score})
                 
-                gc.collect()
+                # Sorteer op score
+                scored_sentences.sort(key=lambda x: x['score'])
+                
+                top_5_negative = scored_sentences[:5]
+                top_5_positive = scored_sentences[-5:]
+                top_5_positive.reverse() # Hoogste positieve bovenaan
 
-                if found_colors:
-                    total = sum(found_colors.values())
-                    fig, ax = plt.subplots(figsize=(10, 2))
-                    left = 0
-                    for c_name, count in found_colors.most_common():
-                        width = count / total
-                        ax.barh(0, width, left=left, color=colors[c_name], edgecolor='black', linewidth=1.5)
-                        if width > 0.05:
-                            ax.text(left + width/2, 0, f"{c_name}\n{int(width*100)}%", 
-                                    ha='center', va='center', 
-                                    color='white' if c_name not in ['white', 'yellow', 'gold', 'f0f0f0'] else 'black',
-                                    fontweight='bold', fontsize=10)
-                        left += width
-                        
-                    ax.set_yticks([])
-                    ax.set_xticks([])
-                    ax.set_title("Novel Aesthetic Proportion", fontsize=14, fontweight='bold')
-                    sns.despine(left=True, bottom=True)
-                    st.pyplot(fig)
-                    plt.close(fig)
-                else:
-                    st.write("No strong color palette detected in this excerpt.")
+                st.markdown("---")
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.error("### 🔴 AI's Top 5 Meest Negatieve Fragmenten")
+                    for i, item in enumerate(top_5_negative):
+                        st.markdown(f"**{i+1}. Score: {item['score']:.2f}**\n\n> *\"{item['text']}\"*")
+                
+                with col2:
+                    st.success("### 🟢 AI's Top 5 Meest Positieve Fragmenten")
+                    for i, item in enumerate(top_5_positive):
+                        st.markdown(f"**{i+1}. Score: {item['score']:.2f}**\n\n> *\"{item['text']}\"*")
+
+                st.markdown("---")
+                st.markdown("### 📝 Reflectie-opdrachten (Handmatige Controle):")
+                st.markdown("""
+                1. **Valse Positieven:** Is een van de 'Positieve' fragmenten eigenlijk cynisch, sarcastisch of duister als je de bredere context van de roman kent? Leg uit waarom de AI zich vergiste.
+                2. **Metaforiek:** Bevatten de fragmenten metaforen (bijv. "Een storm in zijn hart") die door de AI letterlijk (als een gevaarlijke weersomstandigheid) werden vertaald naar een negatieve score?
+                3. **Culturele Implicaties:** Mist het algoritme bepaalde culturele of historische nuances?
+                """)
 
 else:
-    st.info("Please upload a PDF file in the sidebar to begin.")
+    st.info("Upload een PDF in het zijpaneel om het onderzoek te starten.")
